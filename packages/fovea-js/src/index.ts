@@ -27,6 +27,31 @@ export interface RollingFrameStats {
   fps: number;
 }
 
+export interface PerformanceStats {
+  fps: number;
+  frameTimeP50Ms: number;
+  frameTimeP95Ms: number;
+  frameTimeP99Ms: number;
+  frameTimeMs: number;
+  uploadTimeMs: number;
+  drawCalls: number;
+  visibleTiles: number;
+  loadedTiles: number;
+  visibleHeatmapTiles: number;
+  loadedHeatmapTiles: number;
+  visibleCellChunks: number;
+  loadedCellChunks: number;
+  visibleCells: number;
+  visibleObjects: number;
+  gpuMemoryMb: number;
+  cpuMemoryMbEstimate: number;
+  gpuBufferMemoryBytes: number;
+  cpuMemoryBytes: number;
+  inflightTileRequests: number;
+  inflightOverlayRequests: number;
+  inflightHeatmapRequests: number;
+}
+
 export interface CellEvent {
   cellId: number | null;
   classId: number | null;
@@ -112,6 +137,8 @@ export class FoveaViewer {
   private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
+  private lastStats: FrameStats | null = null;
+  private lastRollingStats: RollingFrameStats = emptyRollingStats();
 
   private constructor(
     private readonly wasm: WasmFoveaViewer,
@@ -317,6 +344,46 @@ export class FoveaViewer {
     this.wasm.resetCamera();
   }
 
+  panByScreenDelta(deltaX: number, deltaY: number): void {
+    this.wasm.panByScreenDelta(deltaX, deltaY);
+  }
+
+  zoomAtCanvasPoint(x: number, y: number, wheelDeltaY: number): void {
+    this.wasm.zoomAt(x, y, wheelDeltaY);
+  }
+
+  getPerformanceStats(): PerformanceStats {
+    const stats = this.lastStats;
+    const rolling = this.lastRollingStats;
+    const gpuBytes = stats?.gpuBufferMemoryBytes ?? 0;
+    const cpuBytes = stats?.cpuMemoryBytes ?? 0;
+
+    return {
+      fps: rolling.fps,
+      frameTimeP50Ms: rolling.frameTimeP50,
+      frameTimeP95Ms: rolling.frameTimeP95,
+      frameTimeP99Ms: rolling.frameTimeP99,
+      frameTimeMs: stats?.frameTimeMs ?? 0,
+      uploadTimeMs: stats?.uploadTimeMs ?? 0,
+      drawCalls: stats?.drawCallCount ?? 0,
+      visibleTiles: stats?.visibleTileCount ?? 0,
+      loadedTiles: stats?.loadedTileCount ?? 0,
+      visibleHeatmapTiles: stats?.visibleHeatmapTileCount ?? 0,
+      loadedHeatmapTiles: stats?.loadedHeatmapTileCount ?? 0,
+      visibleCellChunks: stats?.visibleCellChunkCount ?? 0,
+      loadedCellChunks: stats?.loadedCellChunkCount ?? 0,
+      visibleCells: stats?.visibleCellCount ?? 0,
+      visibleObjects: stats?.visibleObjectCount ?? 0,
+      gpuMemoryMb: bytesToMiB(gpuBytes),
+      cpuMemoryMbEstimate: bytesToMiB(cpuBytes),
+      gpuBufferMemoryBytes: gpuBytes,
+      cpuMemoryBytes: cpuBytes,
+      inflightTileRequests: this.inflightTiles.size,
+      inflightOverlayRequests: this.inflightOverlayChunks.size,
+      inflightHeatmapRequests: this.inflightHeatmapTiles.size
+    };
+  }
+
   private resize(): void {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
@@ -347,10 +414,9 @@ export class FoveaViewer {
         return;
       }
 
-      const scale = this.canvasScale();
       this.wasm.panByScreenDelta(
-        (event.clientX - this.lastPointer.clientX) * scale.x,
-        (event.clientY - this.lastPointer.clientY) * scale.y
+        event.clientX - this.lastPointer.clientX,
+        event.clientY - this.lastPointer.clientY
       );
       this.lastPointer = event;
     });
@@ -405,18 +471,10 @@ export class FoveaViewer {
 
   private eventCanvasPoint(event: Pick<MouseEvent, "clientX" | "clientY">): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    const scale = this.canvasScale(rect);
 
     return {
-      x: (event.clientX - rect.left) * scale.x,
-      y: (event.clientY - rect.top) * scale.y
-    };
-  }
-
-  private canvasScale(rect = this.canvas.getBoundingClientRect()): { x: number; y: number } {
-    return {
-      x: this.canvas.width / Math.max(1, rect.width),
-      y: this.canvas.height / Math.max(1, rect.height)
+      x: event.clientX - rect.left,
+      y: event.clientY - rect.top
     };
   }
 
@@ -699,14 +757,11 @@ export class FoveaViewer {
   }
 
   private observeFrame(stats: FrameStats): void {
+    this.lastStats = stats;
     this.frameTimes.push(stats.frameTimeMs);
 
     if (this.frameTimes.length > 180) {
       this.frameTimes.shift();
-    }
-
-    if (!this.onStats) {
-      return;
     }
 
     const sorted = [...this.frameTimes].sort((a, b) => a - b);
@@ -719,6 +774,11 @@ export class FoveaViewer {
       frameTimeP99: percentile(0.99),
       fps: p50 > 0 ? 1000 / p50 : 0
     };
+    this.lastRollingStats = rolling;
+
+    if (!this.onStats) {
+      return;
+    }
 
     this.onStats(stats, rolling);
   }
@@ -787,6 +847,19 @@ export class FoveaViewer {
 }
 
 export type { FrameStats };
+
+function emptyRollingStats(): RollingFrameStats {
+  return {
+    frameTimeP50: 0,
+    frameTimeP95: 0,
+    frameTimeP99: 0,
+    fps: 0
+  };
+}
+
+function bytesToMiB(bytes: number): number {
+  return bytes / (1024 * 1024);
+}
 
 function manifestUrlForBundle(bundleUrl: string): URL {
   const url = new URL(bundleUrl, window.location.href);

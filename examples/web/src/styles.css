@@ -152,6 +152,23 @@ select:hover {
   font-weight: 700;
 }
 
+.benchmark-output {
+  background: color-mix(in srgb, #16191d 88%, transparent);
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
+  bottom: 16px;
+  color: #f3f5f7;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  left: 16px;
+  margin: 0;
+  max-height: min(480px, calc(100% - 32px));
+  max-width: min(640px, calc(100% - 32px));
+  overflow: auto;
+  padding: 12px;
+  position: absolute;
+  white-space: pre-wrap;
+}
+
 @media (max-width: 720px) {
   .toolbar {
     left: 10px;

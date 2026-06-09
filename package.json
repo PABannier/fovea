@@ -4,13 +4,14 @@
   "type": "module",
   "workspaces": [
     "packages/fovea-js",
-    "examples/web"
+    "examples/web",
+    "examples/react"
   ],
   "scripts": {
     "build:wasm": "node scripts/build-wasm.mjs",
-    "build": "npm run build:wasm && npm -w @fovea/js run build && npm -w fovea-web-example run build",
+    "build": "npm run build:wasm && npm -w @fovea/viewer run build && npm -w fovea-web-example run build && npm -w fovea-react-example run build",
     "dev": "npm run build:wasm && npm -w fovea-web-example run dev",
-    "check": "npm run build:wasm && npm -w @fovea/js run check && npm -w fovea-web-example run check"
+    "check": "npm run build:wasm && npm -w @fovea/viewer run check && npm -w @fovea/viewer run build && npm -w fovea-web-example run check && npm -w fovea-react-example run check",
+    "test": "cargo test -p fovea-pack && cargo test -p fovea-viewer --lib"
   }
 }
-

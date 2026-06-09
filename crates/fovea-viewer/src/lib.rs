@@ -25,6 +25,16 @@ const OVERLAY_SELECTED_CLASS_ID: u32 = u32::MAX - 1;
 
 static PANIC_HOOK: Once = Once::new();
 
+#[cfg(target_arch = "wasm32")]
+fn js_error(message: impl AsRef<str>) -> JsValue {
+    JsValue::from_str(message.as_ref())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn js_error(_message: impl AsRef<str>) -> JsValue {
+    JsValue::NULL
+}
+
 #[wasm_bindgen]
 pub struct FoveaViewer {
     renderer: Renderer,
@@ -53,8 +63,11 @@ impl FoveaViewer {
 
     pub fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f64) {
         self.renderer.resize(width, height);
-        self.camera.viewport_width_px = width;
-        self.camera.viewport_height_px = height;
+        let device_pixel_ratio = device_pixel_ratio.max(0.00001);
+        self.camera.viewport_width_px =
+            ((f64::from(width) / device_pixel_ratio).round() as u32).max(1);
+        self.camera.viewport_height_px =
+            ((f64::from(height) / device_pixel_ratio).round() as u32).max(1);
         self.camera.device_pixel_ratio = device_pixel_ratio;
         self.renderer.write_camera(&self.camera);
     }
@@ -345,6 +358,13 @@ pub struct FrameStats {
     upload_time_ms: f64,
     draw_call_count: u32,
     visible_object_count: u32,
+    visible_tile_count: u32,
+    loaded_tile_count: u32,
+    visible_heatmap_tile_count: u32,
+    loaded_heatmap_tile_count: u32,
+    visible_cell_chunk_count: u32,
+    loaded_cell_chunk_count: u32,
+    visible_cell_count: u32,
     gpu_buffer_memory_bytes: u32,
     cpu_memory_bytes: u32,
 }
@@ -369,6 +389,41 @@ impl FrameStats {
     #[wasm_bindgen(getter, js_name = visibleObjectCount)]
     pub fn visible_object_count(&self) -> u32 {
         self.visible_object_count
+    }
+
+    #[wasm_bindgen(getter, js_name = visibleTileCount)]
+    pub fn visible_tile_count(&self) -> u32 {
+        self.visible_tile_count
+    }
+
+    #[wasm_bindgen(getter, js_name = loadedTileCount)]
+    pub fn loaded_tile_count(&self) -> u32 {
+        self.loaded_tile_count
+    }
+
+    #[wasm_bindgen(getter, js_name = visibleHeatmapTileCount)]
+    pub fn visible_heatmap_tile_count(&self) -> u32 {
+        self.visible_heatmap_tile_count
+    }
+
+    #[wasm_bindgen(getter, js_name = loadedHeatmapTileCount)]
+    pub fn loaded_heatmap_tile_count(&self) -> u32 {
+        self.loaded_heatmap_tile_count
+    }
+
+    #[wasm_bindgen(getter, js_name = visibleCellChunkCount)]
+    pub fn visible_cell_chunk_count(&self) -> u32 {
+        self.visible_cell_chunk_count
+    }
+
+    #[wasm_bindgen(getter, js_name = loadedCellChunkCount)]
+    pub fn loaded_cell_chunk_count(&self) -> u32 {
+        self.loaded_cell_chunk_count
+    }
+
+    #[wasm_bindgen(getter, js_name = visibleCellCount)]
+    pub fn visible_cell_count(&self) -> u32 {
+        self.visible_cell_count
     }
 
     #[wasm_bindgen(getter, js_name = gpuBufferMemoryBytes)]
@@ -694,9 +749,8 @@ struct HeatmapManifest {
 
 impl HeatmapManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
-        let raw: RawHeatmapManifest = serde_json::from_str(manifest_json).map_err(|err| {
-            JsValue::from_str(&format!("failed to parse heatmap manifest: {err}"))
-        })?;
+        let raw: RawHeatmapManifest = serde_json::from_str(manifest_json)
+            .map_err(|err| js_error(&format!("failed to parse heatmap manifest: {err}")))?;
         let mut tiles = HashMap::new();
 
         for tile in raw.tiles {
@@ -711,7 +765,7 @@ impl HeatmapManifest {
         }
 
         if raw.levels.is_empty() {
-            return Err(JsValue::from_str("heatmap manifest has no pyramid levels"));
+            return Err(js_error("heatmap manifest has no pyramid levels"));
         }
 
         let levels = raw
@@ -827,14 +881,11 @@ impl HeatmapManifest {
 
 impl CellOverlayManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
-        let raw: RawCellOverlayManifest = serde_json::from_str(manifest_json).map_err(|err| {
-            JsValue::from_str(&format!("failed to parse cell overlay manifest: {err}"))
-        })?;
+        let raw: RawCellOverlayManifest = serde_json::from_str(manifest_json)
+            .map_err(|err| js_error(&format!("failed to parse cell overlay manifest: {err}")))?;
 
         if raw.chunk_width == 0 || raw.chunk_height == 0 {
-            return Err(JsValue::from_str(
-                "cell overlay chunk dimensions must be nonzero",
-            ));
+            return Err(js_error("cell overlay chunk dimensions must be nonzero"));
         }
 
         let mut chunks = HashMap::new();
@@ -941,7 +992,7 @@ struct SlideManifest {
 impl SlideManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawManifest = serde_json::from_str(manifest_json)
-            .map_err(|err| JsValue::from_str(&format!("failed to parse manifest: {err}")))?;
+            .map_err(|err| js_error(&format!("failed to parse manifest: {err}")))?;
         let mut tiles = HashMap::new();
 
         for tile in raw.tiles {
@@ -960,7 +1011,7 @@ impl SlideManifest {
         }
 
         if raw.levels.is_empty() {
-            return Err(JsValue::from_str("manifest has no pyramid levels"));
+            return Err(js_error("manifest has no pyramid levels"));
         }
 
         Ok(Self {
@@ -1150,11 +1201,7 @@ impl Renderer {
             backends: wgpu::Backends::BROWSER_WEBGPU,
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
-            .map_err(|err| {
-                JsValue::from_str(&format!("failed to create WebGPU surface: {err:?}"))
-            })?;
+        let surface = create_canvas_surface(&instance, canvas)?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -1162,7 +1209,7 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|err| JsValue::from_str(&format!("WebGPU adapter unavailable: {err:?}")))?;
+            .map_err(|err| js_error(&format!("WebGPU adapter unavailable: {err:?}")))?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1174,9 +1221,7 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .map_err(|err| {
-                JsValue::from_str(&format!("failed to request WebGPU device: {err:?}"))
-            })?;
+            .map_err(|err| js_error(&format!("failed to request WebGPU device: {err:?}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps
@@ -1485,7 +1530,7 @@ impl Renderer {
 
         let expected_len = width as usize * height as usize * 4;
         if rgba.len() != expected_len {
-            return Err(JsValue::from_str(&format!(
+            return Err(js_error(&format!(
                 "tile RGBA byte length mismatch: got {}, expected {expected_len}",
                 rgba.len()
             )));
@@ -1630,7 +1675,7 @@ impl Renderer {
 
         let expected_len = width as usize * height as usize;
         if bytes.len() != expected_len {
-            return Err(JsValue::from_str(&format!(
+            return Err(js_error(&format!(
                 "heatmap tile byte length mismatch: got {}, expected {expected_len}",
                 bytes.len()
             )));
@@ -1981,6 +2026,13 @@ impl Renderer {
             } else {
                 self.point_count
             },
+            visible_tile_count: slide_draw.visible_tile_count as u32,
+            loaded_tile_count: self.texture_cache.len() as u32,
+            visible_heatmap_tile_count: heatmap_draw.visible_tile_count as u32,
+            loaded_heatmap_tile_count: self.heatmap_cache.len() as u32,
+            visible_cell_chunk_count: overlay_draw.visible_chunk_count,
+            loaded_cell_chunk_count: self.overlay_cache.len() as u32,
+            visible_cell_count: overlay_draw.visible_cell_count,
             gpu_buffer_memory_bytes: self.gpu_buffer_memory_bytes,
             cpu_memory_bytes: self.cpu_memory_bytes,
         })
@@ -2080,6 +2132,7 @@ impl Renderer {
         let mut commands = Vec::new();
         let mut visible_ids = HashSet::new();
         let mut visible_cell_count = 0_u32;
+        let visible_chunk_count = visible_chunks.len() as u32;
 
         for visible in visible_chunks {
             visible_ids.insert(visible.id);
@@ -2095,6 +2148,7 @@ impl Renderer {
             commands,
             visible_ids,
             visible_cell_count,
+            visible_chunk_count,
         }
     }
 
@@ -2252,6 +2306,7 @@ struct OverlayDraw {
     commands: Vec<OverlayDrawCommand>,
     visible_ids: HashSet<OverlayChunkId>,
     visible_cell_count: u32,
+    visible_chunk_count: u32,
 }
 
 impl OverlayDraw {
@@ -2340,6 +2395,10 @@ impl OverlayCache {
 
     fn contains(&self, id: OverlayChunkId) -> bool {
         self.entries.contains_key(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 
     fn entry(&self, id: OverlayChunkId) -> Option<&OverlayEntry> {
@@ -2502,21 +2561,19 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
     let magic = reader.read_bytes(4)?;
 
     if magic != b"FOVC" {
-        return Err(JsValue::from_str("overlay chunk has invalid magic"));
+        return Err(js_error("overlay chunk has invalid magic"));
     }
 
     let version = reader.read_u32()?;
     if version != 1 {
-        return Err(JsValue::from_str("unsupported overlay chunk version"));
+        return Err(js_error("unsupported overlay chunk version"));
     }
 
     let chunk_x = reader.read_u32()?;
     let chunk_y = reader.read_u32()?;
 
     if chunk_x != id.x || chunk_y != id.y {
-        return Err(JsValue::from_str(
-            "overlay chunk coordinates do not match request",
-        ));
+        return Err(js_error("overlay chunk coordinates do not match request"));
     }
 
     let origin_x = reader.read_f32()?;
@@ -2703,7 +2760,7 @@ impl<'a> ByteReader<'a> {
 
     fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], JsValue> {
         if self.offset + len > self.bytes.len() {
-            return Err(JsValue::from_str("overlay chunk ended unexpectedly"));
+            return Err(js_error("overlay chunk ended unexpectedly"));
         }
 
         let start = self.offset;
@@ -2757,6 +2814,10 @@ impl TextureCache {
 
     fn contains(&self, id: TileId) -> bool {
         self.entries.contains_key(&id)
+    }
+
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 
     fn entry(&self, id: TileId) -> Option<&TextureEntry> {
@@ -3180,7 +3241,27 @@ fn create_pipeline(
 }
 
 fn surface_texture_error(err: wgpu::CurrentSurfaceTexture) -> JsValue {
-    JsValue::from_str(&format!("surface texture error: {err:?}"))
+    js_error(&format!("surface texture error: {err:?}"))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn create_canvas_surface(
+    instance: &wgpu::Instance,
+    canvas: HtmlCanvasElement,
+) -> Result<wgpu::Surface<'static>, JsValue> {
+    instance
+        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        .map_err(|err| js_error(&format!("failed to create WebGPU surface: {err:?}")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn create_canvas_surface(
+    _instance: &wgpu::Instance,
+    _canvas: HtmlCanvasElement,
+) -> Result<wgpu::Surface<'static>, JsValue> {
+    Err(js_error(
+        "FoveaViewer WebGPU canvas surfaces are only available on wasm32",
+    ))
 }
 
 #[repr(C)]
@@ -3310,6 +3391,272 @@ impl OverlayStrokeVertex {
                 },
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EPSILON: f64 = 0.25;
+
+    #[test]
+    fn camera_round_trip_preserves_slide_coordinates() {
+        let camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0);
+        let slide = (4_321.25, 3_456.75);
+        let screen = camera.slide_to_screen(slide.0, slide.1);
+        let round_trip = camera.screen_to_slide(screen.0, screen.1);
+
+        assert_close(round_trip.0, slide.0, EPSILON);
+        assert_close(round_trip.1, slide.1, EPSILON);
+    }
+
+    #[test]
+    fn zoom_at_keeps_anchor_slide_coordinate_stable() {
+        let mut camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0);
+        let anchor = (520.0, 375.0);
+        let before = camera.screen_to_slide(anchor.0, anchor.1);
+
+        camera.zoom_at(anchor.0, anchor.1, -240.0);
+
+        let after = camera.screen_to_slide(anchor.0, anchor.1);
+        assert_close(after.0, before.0, EPSILON);
+        assert_close(after.1, before.1, EPSILON);
+    }
+
+    #[test]
+    fn slide_manifest_rejects_empty_pyramid() {
+        let manifest = r#"{
+            "tile_size": 256,
+            "width": 1024,
+            "height": 768,
+            "levels": [],
+            "tiles": []
+        }"#;
+
+        assert!(SlideManifest::from_json(manifest).is_err());
+    }
+
+    #[test]
+    fn slide_tile_culling_returns_visible_edge_tiles() {
+        let manifest = SlideManifest::from_json(
+            r#"{
+                "tile_size": 256,
+                "width": 512,
+                "height": 512,
+                "levels": [
+                    {
+                        "index": 0,
+                        "width": 512,
+                        "height": 512,
+                        "downsample": 1.0,
+                        "tile_cols": 2,
+                        "tile_rows": 2,
+                        "tile_count": 4
+                    }
+                ],
+                "tiles": [
+                    {"level":0,"x":0,"y":0,"width":256,"height":256,"path":"0_0.webp","byte_size":1,"skipped":false},
+                    {"level":0,"x":1,"y":0,"width":256,"height":256,"path":"1_0.webp","byte_size":1,"skipped":false},
+                    {"level":0,"x":0,"y":1,"width":256,"height":256,"path":"0_1.webp","byte_size":1,"skipped":false},
+                    {"level":0,"x":1,"y":1,"width":256,"height":256,"path":"1_1.webp","byte_size":1,"skipped":false}
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+        let mut camera = Camera::fit_dimensions(256, 256, 512.0, 512.0);
+        camera.center_x = 256.0;
+        camera.center_y = 256.0;
+        camera.zoom = 1.0;
+
+        let tiles = manifest.visible_tiles(&camera, manifest.level(0).expect("level 0 exists"));
+        let ids: HashSet<_> = tiles.iter().map(|tile| tile.id).collect();
+
+        assert_eq!(ids.len(), 4);
+        assert!(ids.contains(&TileId {
+            level: 0,
+            x: 0,
+            y: 0
+        }));
+        assert!(ids.contains(&TileId {
+            level: 0,
+            x: 1,
+            y: 1
+        }));
+    }
+
+    #[test]
+    fn heatmap_manifest_accepts_camel_case_tiles() {
+        let manifest = HeatmapManifest::from_json(
+            r#"{
+                "id": "density",
+                "width": 1024,
+                "height": 768,
+                "tileSize": 256,
+                "levels": [
+                    {
+                        "index": 0,
+                        "width": 8,
+                        "height": 6,
+                        "downsample": 128.0,
+                        "tileCols": 1,
+                        "tileRows": 1
+                    }
+                ],
+                "tiles": [
+                    {
+                        "level": 0,
+                        "x": 0,
+                        "y": 0,
+                        "width": 8,
+                        "height": 6,
+                        "path": "tiles/0/0_0.fovh",
+                        "byteSize": 48
+                    }
+                ]
+            }"#,
+        )
+        .expect("heatmap manifest parses");
+
+        assert_eq!(manifest.tile_size, 256);
+        assert_eq!(manifest.tiles.len(), 1);
+    }
+
+    #[test]
+    fn cell_overlay_manifest_rejects_zero_chunk_size() {
+        let manifest = r#"{
+            "id": "cells",
+            "width": 1024,
+            "height": 768,
+            "chunkWidth": 0,
+            "chunkHeight": 256,
+            "chunks": []
+        }"#;
+
+        assert!(CellOverlayManifest::from_json(manifest).is_err());
+    }
+
+    #[test]
+    fn overlay_chunk_parser_decodes_cells_and_polygon_strokes() {
+        let bytes = overlay_chunk_bytes();
+        let decoded = decode_overlay_chunk(OverlayChunkId { x: 2, y: 3 }, &bytes)
+            .expect("overlay chunk parses");
+
+        assert_eq!(decoded.points.len(), 1);
+        assert_eq!(decoded.cells.len(), 1);
+        assert_eq!(decoded.polygon_points.len(), 4);
+        assert_eq!(decoded.strokes.len(), 24);
+        assert_eq!(decoded.cells[0].cell_id, 42);
+        assert_eq!(decoded.cells[0].class_id, 7);
+        assert_close(f64::from(decoded.cells[0].centroid[0]), 600.0, 0.02);
+        assert_close(f64::from(decoded.cells[0].centroid[1]), 850.0, 0.02);
+    }
+
+    #[test]
+    fn quantization_round_trip_error_stays_below_quarter_pixel() {
+        let origin = 512.0;
+        let size = 4096.0;
+        let value = 2345.625;
+        let quantized = quantize_for_test(value, origin, size);
+        let restored = f64::from(dequantize(quantized, origin, size));
+
+        assert_close(restored, f64::from(value), 0.07);
+    }
+
+    #[test]
+    fn point_in_polygon_identifies_inside_and_outside_points() {
+        let polygon = [[10.0, 10.0], [30.0, 10.0], [30.0, 30.0], [10.0, 30.0]];
+
+        assert!(point_in_polygon(20.0, 20.0, &polygon));
+        assert!(!point_in_polygon(40.0, 20.0, &polygon));
+    }
+
+    #[test]
+    fn cell_pick_distance_uses_camera_screen_coordinates() {
+        let camera = Camera::fit_dimensions(400, 300, 1_000.0, 1_000.0);
+        let cell = CellPickRecord {
+            cell_id: 1,
+            class_id: 2,
+            centroid: [500.0, 500.0],
+            bbox: [490.0, 490.0, 510.0, 510.0],
+            vertex_offset: 0,
+            vertex_count: 0,
+        };
+        let screen = camera.slide_to_screen(500.0, 500.0);
+
+        assert_close(
+            cell.screen_distance_squared(&camera, screen.0, screen.1),
+            0.0,
+            0.001,
+        );
+        assert!(cell.bbox_intersects_point(500.0, 500.0, 0.0));
+        assert!(!cell.bbox_intersects_point(540.0, 500.0, 8.0));
+    }
+
+    fn overlay_chunk_bytes() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"FOVC");
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 2);
+        push_u32(&mut bytes, 3);
+        push_f32(&mut bytes, 512.0);
+        push_f32(&mut bytes, 768.0);
+        push_f32(&mut bytes, 1024.0);
+        push_f32(&mut bytes, 1024.0);
+        push_u32(&mut bytes, 1);
+        push_u32(&mut bytes, 4);
+
+        push_u64(&mut bytes, 42);
+        push_u16(&mut bytes, 7);
+        push_u16(&mut bytes, 4);
+        push_f32(&mut bytes, 0.95);
+        push_u16(&mut bytes, quantize_for_test(600.0, 512.0, 1024.0));
+        push_u16(&mut bytes, quantize_for_test(850.0, 768.0, 1024.0));
+        push_u32(&mut bytes, 0);
+        push_u16(&mut bytes, quantize_for_test(580.0, 512.0, 1024.0));
+        push_u16(&mut bytes, quantize_for_test(830.0, 768.0, 1024.0));
+        push_u16(&mut bytes, quantize_for_test(620.0, 512.0, 1024.0));
+        push_u16(&mut bytes, quantize_for_test(870.0, 768.0, 1024.0));
+
+        for (x, y) in [
+            (580.0, 830.0),
+            (620.0, 830.0),
+            (620.0, 870.0),
+            (580.0, 870.0),
+        ] {
+            push_u16(&mut bytes, quantize_for_test(x, 512.0, 1024.0));
+            push_u16(&mut bytes, quantize_for_test(y, 768.0, 1024.0));
+        }
+
+        bytes
+    }
+
+    fn quantize_for_test(value: f32, origin: f32, size: f32) -> u16 {
+        (((value - origin) / size).clamp(0.0, 1.0) * f32::from(u16::MAX)).round() as u16
+    }
+
+    fn push_u16(bytes: &mut Vec<u8>, value: u16) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_f32(bytes: &mut Vec<u8>, value: f32) {
+        bytes.extend_from_slice(&value.to_bits().to_le_bytes());
+    }
+
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) {
+        let delta = (actual - expected).abs();
+        assert!(
+            delta <= tolerance,
+            "actual {actual} differs from expected {expected} by {delta}, tolerance {tolerance}"
+        );
     }
 }
 

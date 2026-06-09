@@ -1,4 +1,4 @@
-import { FoveaViewer } from "@fovea/js";
+import { FoveaViewer } from "@fovea/viewer";
 import "./styles.css";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
