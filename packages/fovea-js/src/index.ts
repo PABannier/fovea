@@ -24,6 +24,38 @@ export interface RollingFrameStats {
   fps: number;
 }
 
+export interface CellEvent {
+  cellId: number | null;
+  classId: number | null;
+  slideX: number | null;
+  slideY: number | null;
+}
+
+export interface SelectionChangeEvent {
+  count: number;
+}
+
+export interface ViewportChangeEvent {
+  centerX: number;
+  centerY: number;
+  zoom: number;
+}
+
+export interface FoveaViewerEvents {
+  "cell-hover": CellEvent;
+  "cell-click": CellEvent;
+  "selection-change": SelectionChangeEvent;
+  "viewport-change": ViewportChangeEvent;
+}
+
+type EventCallback<T> = (event: T) => void;
+
+type RawViewerEvent =
+  | ({ type: "cell-hover" } & CellEvent)
+  | ({ type: "cell-click" } & CellEvent)
+  | ({ type: "selection-change" } & SelectionChangeEvent)
+  | ({ type: "viewport-changed" } & ViewportChangeEvent);
+
 interface TileRequest {
   level: number;
   x: number;
@@ -51,12 +83,14 @@ export class FoveaViewer {
   private tileBaseUrl: string | null = null;
   private overlayBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
+  private pointerDown: { clientX: number; clientY: number } | null = null;
   private readonly tileRequestBatchSize: number;
   private readonly overlayRequestBatchSize: number;
   private readonly maxConcurrentTileRequests: number;
   private readonly maxConcurrentOverlayRequests: number;
   private readonly inflightTiles = new Map<string, AbortController>();
   private readonly inflightOverlayChunks = new Map<string, AbortController>();
+  private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
 
@@ -112,6 +146,7 @@ export class FoveaViewer {
       this.pumpTileRequests();
       this.pumpOverlayRequests();
       const stats = this.wasm.render();
+      this.dispatchDrainedEvents();
       this.observeFrame(stats);
       this.animationFrame = requestAnimationFrame(tick);
     };
@@ -182,6 +217,45 @@ export class FoveaViewer {
     this.wasm.setPointCount(count);
   }
 
+  setLayerVisibility(layerId: "cells", visible: boolean): void {
+    if (layerId !== "cells") {
+      return;
+    }
+
+    this.wasm.setOverlayVisibility(visible);
+  }
+
+  setLayerOpacity(layerId: "cells", opacity: number): void {
+    if (layerId !== "cells") {
+      return;
+    }
+
+    this.wasm.setOverlayOpacity(opacity);
+  }
+
+  setOverlayPointSize(sizePx: number): void {
+    this.wasm.setOverlayPointSize(sizePx);
+  }
+
+  setOverlayOutlineWidth(widthPx: number): void {
+    this.wasm.setOverlayOutlineWidth(widthPx);
+  }
+
+  on<K extends keyof FoveaViewerEvents>(
+    eventName: K,
+    callback: EventCallback<FoveaViewerEvents[K]>
+  ): () => void {
+    let listeners = this.eventListeners.get(eventName);
+
+    if (!listeners) {
+      listeners = new Set();
+      this.eventListeners.set(eventName, listeners);
+    }
+
+    listeners.add(callback as EventCallback<any>);
+    return () => listeners?.delete(callback as EventCallback<any>);
+  }
+
   resetCamera(): void {
     this.wasm.resetCamera();
   }
@@ -204,10 +278,15 @@ export class FoveaViewer {
     this.canvas.addEventListener("pointerdown", (event) => {
       this.canvas.setPointerCapture(event.pointerId);
       this.lastPointer = event;
+      this.pointerDown = {
+        clientX: event.clientX,
+        clientY: event.clientY
+      };
     });
 
     this.canvas.addEventListener("pointermove", (event) => {
       if (!this.lastPointer) {
+        this.hoverAtEvent(event);
         return;
       }
 
@@ -219,12 +298,27 @@ export class FoveaViewer {
       this.lastPointer = event;
     });
 
-    this.canvas.addEventListener("pointerup", () => {
+    this.canvas.addEventListener("pointerup", (event) => {
+      if (this.pointerDown) {
+        const moved = Math.hypot(
+          event.clientX - this.pointerDown.clientX,
+          event.clientY - this.pointerDown.clientY
+        );
+
+        if (moved <= 4) {
+          this.clickAtEvent(event);
+        } else {
+          this.hoverAtEvent(event);
+        }
+      }
+
       this.lastPointer = null;
+      this.pointerDown = null;
     });
 
     this.canvas.addEventListener("pointercancel", () => {
       this.lastPointer = null;
+      this.pointerDown = null;
     });
 
     this.canvas.addEventListener(
@@ -241,6 +335,26 @@ export class FoveaViewer {
       },
       { passive: false }
     );
+  }
+
+  private hoverAtEvent(event: PointerEvent): void {
+    const point = this.eventCanvasPoint(event);
+    this.wasm.hoverAt(point.x, point.y);
+  }
+
+  private clickAtEvent(event: PointerEvent): void {
+    const point = this.eventCanvasPoint(event);
+    this.wasm.clickAt(point.x, point.y);
+  }
+
+  private eventCanvasPoint(event: PointerEvent): { x: number; y: number } {
+    const rect = this.canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+
+    return {
+      x: (event.clientX - rect.left) * dpr,
+      y: (event.clientY - rect.top) * dpr
+    };
   }
 
   private pumpTileRequests(): void {
@@ -453,6 +567,44 @@ export class FoveaViewer {
     };
 
     this.onStats(stats, rolling);
+  }
+
+  private dispatchDrainedEvents(): void {
+    let events: RawViewerEvent[];
+
+    try {
+      events = JSON.parse(this.wasm.drainEvents()) as RawViewerEvent[];
+    } catch {
+      return;
+    }
+
+    for (const event of events) {
+      if (event.type === "viewport-changed") {
+        this.dispatchEvent("viewport-change", {
+          centerX: event.centerX,
+          centerY: event.centerY,
+          zoom: event.zoom
+        });
+        continue;
+      }
+
+      this.dispatchEvent(event.type, event as FoveaViewerEvents[typeof event.type]);
+    }
+  }
+
+  private dispatchEvent<K extends keyof FoveaViewerEvents>(
+    eventName: K,
+    event: FoveaViewerEvents[K]
+  ): void {
+    const listeners = this.eventListeners.get(eventName);
+
+    if (!listeners) {
+      return;
+    }
+
+    for (const listener of listeners) {
+      listener(event);
+    }
   }
 
   private abortInflightTiles(): void {

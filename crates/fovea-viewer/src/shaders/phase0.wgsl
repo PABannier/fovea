@@ -3,7 +3,7 @@ struct Camera {
   zoom: f32,
   _pad0: f32,
   viewport: vec2<f32>,
-  _pad1: vec2<f32>,
+  overlay: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -87,23 +87,30 @@ fn fs_point(input: VertexOut) -> @location(0) vec4<f32> {
 }
 
 fn class_color(class_id: u32) -> vec4<f32> {
+  if class_id == 4294967295u {
+    return vec4<f32>(1.0, 1.0, 1.0, 1.0);
+  }
+  if class_id == 4294967294u {
+    return vec4<f32>(1.0, 0.92, 0.16, 1.0);
+  }
+
   let value = class_id % 6u;
   if value == 0u {
-    return vec4<f32>(0.00, 0.78, 0.86, 0.78);
+    return vec4<f32>(0.00, 0.78, 0.86, 1.0);
   }
   if value == 1u {
-    return vec4<f32>(1.00, 0.55, 0.24, 0.78);
+    return vec4<f32>(1.00, 0.55, 0.24, 1.0);
   }
   if value == 2u {
-    return vec4<f32>(0.48, 0.82, 0.36, 0.78);
+    return vec4<f32>(0.48, 0.82, 0.36, 1.0);
   }
   if value == 3u {
-    return vec4<f32>(0.92, 0.38, 0.58, 0.78);
+    return vec4<f32>(0.92, 0.38, 0.58, 1.0);
   }
   if value == 4u {
-    return vec4<f32>(0.62, 0.55, 0.98, 0.78);
+    return vec4<f32>(0.62, 0.55, 0.98, 1.0);
   }
-  return vec4<f32>(0.98, 0.82, 0.24, 0.78);
+  return vec4<f32>(0.98, 0.82, 0.24, 1.0);
 }
 
 @vertex
@@ -120,8 +127,12 @@ fn vs_overlay_point(
     vec2<f32>(1.0, 1.0),
     vec2<f32>(-1.0, 1.0)
   );
+  var size = camera.overlay.y;
+  if class_id >= 4294967294u {
+    size = camera.overlay.y + 7.0;
+  }
   let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
-  let sized = screen + corners[vertex_index] * 2.0;
+  let sized = screen + corners[vertex_index] * size * 0.5;
   let ndc = vec2<f32>(
     (sized.x / camera.viewport.x) * 2.0 - 1.0,
     1.0 - (sized.y / camera.viewport.y) * 2.0
@@ -129,25 +140,43 @@ fn vs_overlay_point(
 
   var out: VertexOut;
   out.position = vec4<f32>(ndc, 0.0, 1.0);
-  out.color = class_color(class_id);
+  let base_color = class_color(class_id);
+  var alpha = camera.overlay.x * 0.78;
+  if class_id >= 4294967294u {
+    alpha = 1.0;
+  }
+  out.color = vec4<f32>(base_color.rgb, alpha);
   out.uv = vec2<f32>(0.0, 0.0);
   return out;
 }
 
 @vertex
 fn vs_overlay_line(
-  @location(0) world_position: vec2<f32>,
-  @location(1) class_id: u32
+  @location(0) segment_start: vec2<f32>,
+  @location(1) segment_end: vec2<f32>,
+  @location(2) endpoint: f32,
+  @location(3) side: f32,
+  @location(4) class_id: u32
 ) -> VertexOut {
+  let world_position = segment_start + (segment_end - segment_start) * endpoint;
   let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
+  let start_screen = (segment_start - camera.center) * camera.zoom + camera.viewport * 0.5;
+  let end_screen = (segment_end - camera.center) * camera.zoom + camera.viewport * 0.5;
+  let delta = end_screen - start_screen;
+  var normal = vec2<f32>(0.0, 1.0);
+  if dot(delta, delta) > 0.0001 {
+    let direction = normalize(delta);
+    normal = vec2<f32>(-direction.y, direction.x);
+  }
+  let sized = screen + normal * side * camera.overlay.z * 0.5;
   let ndc = vec2<f32>(
-    (screen.x / camera.viewport.x) * 2.0 - 1.0,
-    1.0 - (screen.y / camera.viewport.y) * 2.0
+    (sized.x / camera.viewport.x) * 2.0 - 1.0,
+    1.0 - (sized.y / camera.viewport.y) * 2.0
   );
 
   var out: VertexOut;
   out.position = vec4<f32>(ndc, 0.0, 1.0);
-  out.color = vec4<f32>(class_color(class_id).rgb, 0.66);
+  out.color = vec4<f32>(class_color(class_id).rgb, camera.overlay.x * 0.72);
   out.uv = vec2<f32>(0.0, 0.0);
   return out;
 }

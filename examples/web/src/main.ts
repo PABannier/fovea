@@ -7,6 +7,8 @@ const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
 const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
 const overlayForm = document.querySelector<HTMLFormElement>("#overlay-form");
 const overlayInput = document.querySelector<HTMLInputElement>("#overlay-url");
+const overlayVisible = document.querySelector<HTMLInputElement>("#overlay-visible");
+const overlayOpacity = document.querySelector<HTMLInputElement>("#overlay-opacity");
 const loadStatus = document.querySelector<HTMLElement>("#load-status");
 
 if (
@@ -16,6 +18,8 @@ if (
   !bundleInput ||
   !overlayForm ||
   !overlayInput ||
+  !overlayVisible ||
+  !overlayOpacity ||
   !loadStatus
 ) {
   throw new Error("Fovea example DOM is incomplete");
@@ -27,6 +31,8 @@ const bundleUrlForm = bundleForm;
 const bundleUrlInput = bundleInput;
 const overlayUrlForm = overlayForm;
 const overlayUrlInput = overlayInput;
+const overlayVisibleInput = overlayVisible;
+const overlayOpacityInput = overlayOpacity;
 const bundleLoadStatus = loadStatus;
 let slideLoaded = false;
 let overlayLoaded = false;
@@ -40,6 +46,7 @@ const values = {
   upload: document.querySelector<HTMLElement>("#upload"),
   draws: document.querySelector<HTMLElement>("#draws"),
   visible: document.querySelector<HTMLElement>("#visible"),
+  cell: document.querySelector<HTMLElement>("#cell"),
   gpu: document.querySelector<HTMLElement>("#gpu"),
   cpu: document.querySelector<HTMLElement>("#cpu")
 };
@@ -89,6 +96,20 @@ async function main(): Promise<void> {
   });
 
   resetCameraButton.addEventListener("click", () => viewer.resetCamera());
+  overlayVisibleInput.addEventListener("change", () => {
+    viewer.setLayerVisibility("cells", overlayVisibleInput.checked);
+  });
+  overlayOpacityInput.addEventListener("input", () => {
+    viewer.setLayerOpacity("cells", Number(overlayOpacityInput.value));
+  });
+  viewer.on("cell-hover", (event) => {
+    if (event.cellId == null) {
+      setText("cell", "None");
+      return;
+    }
+
+    setText("cell", `${event.cellId} / class ${event.classId ?? "?"}`);
+  });
 
   bundleUrlForm.addEventListener("submit", (event) => {
     event.preventDefault();

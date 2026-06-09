@@ -30,6 +30,14 @@
           <button id="load-overlay" type="submit">Overlay</button>
         </form>
         <button id="reset-camera" type="button">Reset</button>
+        <label class="cell-toggle">
+          <input id="overlay-visible" type="checkbox" checked />
+          Cells
+        </label>
+        <label class="opacity-control">
+          Opacity
+          <input id="overlay-opacity" type="range" min="0" max="1" step="0.01" value="0.78" />
+        </label>
         <span id="load-status" class="load-status">Synthetic</span>
       </section>
       <section class="stats" aria-live="polite">
@@ -41,6 +49,7 @@
         <div><span>Upload</span><strong id="upload">0 ms</strong></div>
         <div><span>Draws</span><strong id="draws">0</strong></div>
         <div><span>Visible</span><strong id="visible">0</strong></div>
+        <div><span>Cell</span><strong id="cell">None</strong></div>
         <div><span>GPU buffers</span><strong id="gpu">0 MB</strong></div>
         <div><span>CPU temp</span><strong id="cpu">0 MB</strong></div>
       </section>

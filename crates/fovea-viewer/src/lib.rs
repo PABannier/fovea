@@ -17,6 +17,9 @@ const TILE_CACHE_HARD_LIMIT_BYTES: usize = 384 * 1024 * 1024;
 const OVERLAY_CACHE_SOFT_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 const OVERLAY_CACHE_HARD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
 const POLYGON_OUTLINE_MIN_ZOOM: f64 = 0.05;
+const OVERLAY_PICK_RADIUS_PX: f64 = 8.0;
+const OVERLAY_HOVER_CLASS_ID: u32 = u32::MAX;
+const OVERLAY_SELECTED_CLASS_ID: u32 = u32::MAX - 1;
 
 static PANIC_HOOK: Once = Once::new();
 
@@ -24,6 +27,7 @@ static PANIC_HOOK: Once = Once::new();
 pub struct FoveaViewer {
     renderer: Renderer,
     camera: Camera,
+    events: Vec<ViewerEvent>,
 }
 
 #[wasm_bindgen]
@@ -38,7 +42,11 @@ impl FoveaViewer {
         renderer.write_camera(&camera);
         renderer.set_point_count(100_000)?;
 
-        Ok(Self { renderer, camera })
+        Ok(Self {
+            renderer,
+            camera,
+            events: Vec::new(),
+        })
     }
 
     pub fn resize(&mut self, width: u32, height: u32, device_pixel_ratio: f64) {
@@ -79,6 +87,11 @@ impl FoveaViewer {
         self.camera.pan_by_screen_delta(delta_x, delta_y);
         self.camera.clamp_to_world();
         self.renderer.write_camera(&self.camera);
+        self.events.push(ViewerEvent::ViewportChanged {
+            center_x: self.camera.center_x,
+            center_y: self.camera.center_y,
+            zoom: self.camera.zoom,
+        });
     }
 
     #[wasm_bindgen(js_name = zoomAt)]
@@ -86,6 +99,11 @@ impl FoveaViewer {
         self.camera.zoom_at(screen_x, screen_y, wheel_delta_y);
         self.camera.clamp_to_world();
         self.renderer.write_camera(&self.camera);
+        self.events.push(ViewerEvent::ViewportChanged {
+            center_x: self.camera.center_x,
+            center_y: self.camera.center_y,
+            zoom: self.camera.zoom,
+        });
     }
 
     #[wasm_bindgen(js_name = setPointCount)]
@@ -117,7 +135,18 @@ impl FoveaViewer {
     #[wasm_bindgen(js_name = loadOverlayManifest)]
     pub fn load_overlay_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
         let manifest = CellOverlayManifest::from_json(manifest_json)?;
+        let should_fit_overlay = self.renderer.slide_dimensions().is_none();
+        let dimensions = manifest.dimensions();
         self.renderer.set_cell_overlay_manifest(manifest);
+        if should_fit_overlay {
+            self.camera = Camera::fit_dimensions(
+                self.renderer.width,
+                self.renderer.height,
+                dimensions.0,
+                dimensions.1,
+            );
+            self.renderer.write_camera(&self.camera);
+        }
         Ok(())
     }
 
@@ -139,9 +168,110 @@ impl FoveaViewer {
             .upload_overlay_chunk_bytes(OverlayChunkId { x, y }, bytes)
     }
 
+    #[wasm_bindgen(js_name = setOverlayVisibility)]
+    pub fn set_overlay_visibility(&mut self, visible: bool) {
+        self.renderer.set_overlay_visibility(visible);
+        self.renderer.write_camera(&self.camera);
+
+        if !visible {
+            self.events.push(ViewerEvent::CellHover {
+                cell_id: None,
+                class_id: None,
+                slide_x: None,
+                slide_y: None,
+            });
+            self.events.push(ViewerEvent::SelectionChange { count: 0 });
+        }
+    }
+
+    #[wasm_bindgen(js_name = setOverlayOpacity)]
+    pub fn set_overlay_opacity(&mut self, opacity: f64) {
+        self.renderer.set_overlay_opacity(opacity);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setOverlayPointSize)]
+    pub fn set_overlay_point_size(&mut self, size_px: f64) {
+        self.renderer.set_overlay_point_size(size_px);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setOverlayOutlineWidth)]
+    pub fn set_overlay_outline_width(&mut self, width_px: f64) {
+        self.renderer.set_overlay_outline_width(width_px);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = hoverAt)]
+    pub fn hover_at(&mut self, screen_x: f64, screen_y: f64) {
+        let hit = self.renderer.pick_cell(&self.camera, screen_x, screen_y);
+
+        if self.renderer.hovered_cell_id() == hit.as_ref().map(|cell| cell.cell_id) {
+            return;
+        }
+
+        self.renderer.set_hovered_cell(hit);
+        self.events.push(ViewerEvent::CellHover {
+            cell_id: self.renderer.hovered_cell_id(),
+            class_id: self.renderer.hovered_class_id(),
+            slide_x: self.renderer.hovered_slide_position().map(|p| p.0),
+            slide_y: self.renderer.hovered_slide_position().map(|p| p.1),
+        });
+    }
+
+    #[wasm_bindgen(js_name = clickAt)]
+    pub fn click_at(&mut self, screen_x: f64, screen_y: f64) {
+        let hit = self.renderer.pick_cell(&self.camera, screen_x, screen_y);
+        self.renderer.set_selected_cell(hit.clone());
+        self.events.push(ViewerEvent::CellClick {
+            cell_id: hit.as_ref().map(|cell| cell.cell_id),
+            class_id: hit.as_ref().map(|cell| cell.class_id),
+            slide_x: hit.as_ref().map(|cell| f64::from(cell.centroid[0])),
+            slide_y: hit.as_ref().map(|cell| f64::from(cell.centroid[1])),
+        });
+        self.events.push(ViewerEvent::SelectionChange {
+            count: u32::from(hit.is_some()),
+        });
+    }
+
+    #[wasm_bindgen(js_name = drainEvents)]
+    pub fn drain_events(&mut self) -> String {
+        let events = std::mem::take(&mut self.events);
+        serde_json::to_string(&events).unwrap_or_else(|_| "[]".to_string())
+    }
+
     pub fn render(&mut self) -> Result<FrameStats, JsValue> {
         self.renderer.render(&self.camera)
     }
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+enum ViewerEvent {
+    ViewportChanged {
+        center_x: f64,
+        center_y: f64,
+        zoom: f64,
+    },
+    CellHover {
+        cell_id: Option<u64>,
+        class_id: Option<u32>,
+        slide_x: Option<f64>,
+        slide_y: Option<f64>,
+    },
+    CellClick {
+        cell_id: Option<u64>,
+        class_id: Option<u32>,
+        slide_x: Option<f64>,
+        slide_y: Option<f64>,
+    },
+    SelectionChange {
+        count: u32,
+    },
 }
 
 #[wasm_bindgen]
@@ -240,6 +370,12 @@ impl Camera {
         (x, y)
     }
 
+    fn slide_to_screen(&self, slide_x: f64, slide_y: f64) -> (f64, f64) {
+        let x = (slide_x - self.center_x) * self.zoom + self.viewport_width_px as f64 * 0.5;
+        let y = (slide_y - self.center_y) * self.zoom + self.viewport_height_px as f64 * 0.5;
+        (x, y)
+    }
+
     fn visible_rect(&self) -> Rect {
         let width = self.viewport_width_px as f64 / self.zoom;
         let height = self.viewport_height_px as f64 / self.zoom;
@@ -264,7 +400,7 @@ impl Camera {
         self.center_y = self.center_y.clamp(min_y, max_y);
     }
 
-    fn as_uniform(&self) -> CameraUniform {
+    fn as_uniform(&self, overlay_style: OverlayStyle) -> CameraUniform {
         CameraUniform {
             center: [self.center_x as f32, self.center_y as f32],
             zoom: self.zoom as f32,
@@ -274,6 +410,12 @@ impl Camera {
                 self.viewport_height_px as f32,
             ],
             _pad1: [0.0, 0.0],
+            overlay: [
+                overlay_style.opacity,
+                overlay_style.point_size_px,
+                overlay_style.outline_width_px,
+                if overlay_style.visible { 1.0 } else { 0.0 },
+            ],
         }
     }
 }
@@ -445,6 +587,10 @@ impl CellOverlayManifest {
             chunk_height: raw.chunk_height,
             chunks,
         })
+    }
+
+    fn dimensions(&self) -> (f64, f64) {
+        (self.width, self.height)
     }
 
     fn visible_chunks(&self, camera: &Camera) -> Vec<VisibleOverlayChunk> {
@@ -672,10 +818,32 @@ struct Renderer {
     cell_overlay_manifest: Option<CellOverlayManifest>,
     texture_cache: TextureCache,
     overlay_cache: OverlayCache,
+    overlay_style: OverlayStyle,
+    hovered_cell: Option<CellHit>,
+    selected_cell: Option<CellHit>,
     frame_index: u64,
     last_upload_time_ms: f64,
     gpu_buffer_memory_bytes: u32,
     cpu_memory_bytes: u32,
+}
+
+#[derive(Clone, Copy)]
+struct OverlayStyle {
+    visible: bool,
+    opacity: f32,
+    point_size_px: f32,
+    outline_width_px: f32,
+}
+
+impl Default for OverlayStyle {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            opacity: 0.78,
+            point_size_px: 3.0,
+            outline_width_px: 1.25,
+        }
+    }
 }
 
 impl Renderer {
@@ -740,8 +908,9 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/phase0.wgsl").into()),
         });
 
+        let overlay_style = OverlayStyle::default();
         let camera_uniform =
-            Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE).as_uniform();
+            Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE).as_uniform(overlay_style);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fovea-camera"),
             contents: bytemuck::bytes_of(&camera_uniform),
@@ -857,6 +1026,9 @@ impl Renderer {
                 OVERLAY_CACHE_SOFT_LIMIT_BYTES,
                 OVERLAY_CACHE_HARD_LIMIT_BYTES,
             ),
+            overlay_style,
+            hovered_cell: None,
+            selected_cell: None,
             frame_index: 0,
             last_upload_time_ms: 0.0,
             gpu_buffer_memory_bytes: std::mem::size_of::<CameraUniform>() as u32,
@@ -901,7 +1073,7 @@ impl Renderer {
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::bytes_of(&camera.as_uniform()),
+            bytemuck::bytes_of(&camera.as_uniform(self.overlay_style)),
         );
     }
 
@@ -1027,6 +1199,10 @@ impl Renderer {
         camera: &Camera,
         max_requests: usize,
     ) -> Option<String> {
+        if !self.overlay_style.visible {
+            return Some("[]".to_string());
+        }
+
         let manifest = self.cell_overlay_manifest.as_ref()?;
         let mut requests = Vec::new();
 
@@ -1070,11 +1246,108 @@ impl Renderer {
         Ok(())
     }
 
+    fn set_overlay_visibility(&mut self, visible: bool) {
+        self.overlay_style.visible = visible;
+        if !visible {
+            self.hovered_cell = None;
+            self.selected_cell = None;
+        }
+    }
+
+    fn set_overlay_opacity(&mut self, opacity: f64) {
+        self.overlay_style.opacity = (opacity as f32).clamp(0.0, 1.0);
+    }
+
+    fn set_overlay_point_size(&mut self, size_px: f64) {
+        self.overlay_style.point_size_px = (size_px as f32).clamp(1.0, 12.0);
+    }
+
+    fn set_overlay_outline_width(&mut self, width_px: f64) {
+        self.overlay_style.outline_width_px = (width_px as f32).clamp(0.25, 6.0);
+    }
+
+    fn hovered_cell_id(&self) -> Option<u64> {
+        self.hovered_cell.as_ref().map(|cell| cell.cell_id)
+    }
+
+    fn hovered_class_id(&self) -> Option<u32> {
+        self.hovered_cell.as_ref().map(|cell| cell.class_id)
+    }
+
+    fn hovered_slide_position(&self) -> Option<(f64, f64)> {
+        self.hovered_cell
+            .as_ref()
+            .map(|cell| (f64::from(cell.centroid[0]), f64::from(cell.centroid[1])))
+    }
+
+    fn set_hovered_cell(&mut self, hit: Option<CellHit>) {
+        self.hovered_cell = hit;
+    }
+
+    fn set_selected_cell(&mut self, hit: Option<CellHit>) {
+        self.selected_cell = hit;
+    }
+
+    fn pick_cell(&self, camera: &Camera, screen_x: f64, screen_y: f64) -> Option<CellHit> {
+        if !self.overlay_style.visible {
+            return None;
+        }
+
+        let manifest = self.cell_overlay_manifest.as_ref()?;
+        let slide = camera.screen_to_slide(screen_x, screen_y);
+        let radius_slide = OVERLAY_PICK_RADIUS_PX / camera.zoom.max(0.00001);
+        let mut best: Option<(CellHit, f64)> = None;
+
+        for visible in manifest.visible_chunks(camera) {
+            let Some(entry) = self.overlay_cache.entry(visible.id) else {
+                continue;
+            };
+
+            for cell in &entry.cells {
+                if !cell.bbox_intersects_point(slide.0 as f32, slide.1 as f32, radius_slide as f32)
+                {
+                    continue;
+                }
+
+                let inside_polygon =
+                    entry.cell_contains_point(cell, slide.0 as f32, slide.1 as f32);
+                let screen_distance = cell.screen_distance_squared(camera, screen_x, screen_y);
+
+                if !inside_polygon && screen_distance > OVERLAY_PICK_RADIUS_PX.powi(2) {
+                    continue;
+                }
+
+                let score = if inside_polygon {
+                    screen_distance * 0.01
+                } else {
+                    screen_distance
+                };
+
+                match &best {
+                    Some((_, best_score)) if *best_score <= score => {}
+                    _ => {
+                        best = Some((
+                            CellHit {
+                                cell_id: cell.cell_id,
+                                class_id: cell.class_id,
+                                centroid: cell.centroid,
+                            },
+                            score,
+                        ));
+                    }
+                }
+            }
+        }
+
+        best.map(|(hit, _)| hit)
+    }
+
     fn render(&mut self, camera: &Camera) -> Result<FrameStats, JsValue> {
         let start = Date::now();
         self.frame_index = self.frame_index.wrapping_add(1);
         let slide_draw = self.prepare_slide_draw(camera);
         let overlay_draw = self.prepare_overlay_draw(camera);
+        let overlay_highlights = self.prepare_overlay_highlights();
         let tile_vertex_buffer = if slide_draw.vertices.is_empty() {
             None
         } else {
@@ -1083,6 +1356,18 @@ impl Renderer {
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                         label: Some("fovea-visible-tile-vertices"),
                         contents: bytemuck::cast_slice(&slide_draw.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    }),
+            )
+        };
+        let overlay_highlight_buffer = if overlay_highlights.is_empty() {
+            None
+        } else {
+            Some(
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("fovea-overlay-highlights"),
+                        contents: bytemuck::cast_slice(&overlay_highlights),
                         usage: wgpu::BufferUsages::VERTEX,
                     }),
             )
@@ -1166,19 +1451,19 @@ impl Renderer {
                 }
             }
 
-            if !overlay_draw.commands.is_empty() {
+            if !overlay_draw.commands.is_empty() || overlay_highlight_buffer.is_some() {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
 
                 if camera.zoom >= POLYGON_OUTLINE_MIN_ZOOM {
                     pass.set_pipeline(&self.overlay_line_pipeline);
                     for command in &overlay_draw.commands {
                         if let Some(entry) = self.overlay_cache.entry(command.id) {
-                            if entry.line_vertex_count == 0 {
+                            if entry.stroke_vertex_count == 0 {
                                 continue;
                             }
 
-                            pass.set_vertex_buffer(0, entry.line_buffer.slice(..));
-                            pass.draw(0..entry.line_vertex_count, 0..1);
+                            pass.set_vertex_buffer(0, entry.stroke_buffer.slice(..));
+                            pass.draw(0..entry.stroke_vertex_count, 0..1);
                         }
                     }
                 }
@@ -1189,6 +1474,11 @@ impl Renderer {
                         pass.set_vertex_buffer(0, entry.point_buffer.slice(..));
                         pass.draw(0..6, 0..entry.point_count);
                     }
+                }
+
+                if let Some(highlight_buffer) = &overlay_highlight_buffer {
+                    pass.set_vertex_buffer(0, highlight_buffer.slice(..));
+                    pass.draw(0..6, 0..overlay_highlights.len() as u32);
                 }
             }
         }
@@ -1208,7 +1498,8 @@ impl Renderer {
             } else {
                 0
             };
-        let overlay_draw_calls = overlay_draw.draw_call_count(camera.zoom);
+        let overlay_draw_calls = overlay_draw.draw_call_count(camera.zoom)
+            + usize::from(overlay_highlight_buffer.is_some());
 
         Ok(FrameStats {
             frame_time_ms: Date::now() - start,
@@ -1266,6 +1557,10 @@ impl Renderer {
     }
 
     fn prepare_overlay_draw(&mut self, camera: &Camera) -> OverlayDraw {
+        if !self.overlay_style.visible {
+            return OverlayDraw::default();
+        }
+
         let Some(manifest) = &self.cell_overlay_manifest else {
             return OverlayDraw::default();
         };
@@ -1290,6 +1585,34 @@ impl Renderer {
             visible_ids,
             visible_cell_count,
         }
+    }
+
+    fn prepare_overlay_highlights(&self) -> Vec<OverlayPointVertex> {
+        if !self.overlay_style.visible {
+            return Vec::new();
+        }
+
+        let mut highlights = Vec::with_capacity(2);
+
+        if let Some(cell) = &self.selected_cell {
+            highlights.push(OverlayPointVertex {
+                position: cell.centroid,
+                class_id: OVERLAY_SELECTED_CLASS_ID,
+                _pad: 0,
+            });
+        }
+
+        if let Some(cell) = &self.hovered_cell {
+            if self.selected_cell.as_ref().map(|selected| selected.cell_id) != Some(cell.cell_id) {
+                highlights.push(OverlayPointVertex {
+                    position: cell.centroid,
+                    class_id: OVERLAY_HOVER_CLASS_ID,
+                    _pad: 0,
+                });
+            }
+        }
+
+        highlights
     }
 
     fn sample_for_visible_tile(
@@ -1351,7 +1674,8 @@ impl Renderer {
             + point_bytes as usize;
 
         self.gpu_buffer_memory_bytes = gpu_bytes.min(u32::MAX as usize) as u32;
-        self.cpu_memory_bytes = extra_cpu_bytes.min(u32::MAX as usize) as u32;
+        self.cpu_memory_bytes =
+            (extra_cpu_bytes + self.overlay_cache.cpu_bytes).min(u32::MAX as usize) as u32;
     }
 }
 
@@ -1434,6 +1758,7 @@ struct OverlayCache {
     hard_limit_bytes: usize,
     entries: HashMap<OverlayChunkId, OverlayEntry>,
     bytes: usize,
+    cpu_bytes: usize,
 }
 
 impl OverlayCache {
@@ -1443,12 +1768,14 @@ impl OverlayCache {
             hard_limit_bytes,
             entries: HashMap::new(),
             bytes: 0,
+            cpu_bytes: 0,
         }
     }
 
     fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.cpu_bytes = 0;
     }
 
     fn contains(&self, id: OverlayChunkId) -> bool {
@@ -1474,35 +1801,42 @@ impl OverlayCache {
     ) -> Result<(), JsValue> {
         if let Some(old) = self.entries.remove(&id) {
             self.bytes = self.bytes.saturating_sub(old.bytes);
+            self.cpu_bytes = self.cpu_bytes.saturating_sub(old.cpu_bytes);
         }
 
         let decoded = decode_overlay_chunk(id, bytes)?;
         let point_bytes = bytemuck::cast_slice(&decoded.points);
-        let line_bytes = bytemuck::cast_slice(&decoded.lines);
+        let stroke_bytes = bytemuck::cast_slice(&decoded.strokes);
         let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fovea-overlay-points"),
             contents: point_bytes,
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("fovea-overlay-lines"),
-            contents: line_bytes,
+        let stroke_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fovea-overlay-strokes"),
+            contents: stroke_bytes,
             usage: wgpu::BufferUsages::VERTEX,
         });
-        let entry_bytes = point_bytes.len() + line_bytes.len();
+        let entry_bytes = point_bytes.len() + stroke_bytes.len();
+        let cpu_bytes = decoded.cells.len() * std::mem::size_of::<CellPickRecord>()
+            + decoded.polygon_points.len() * std::mem::size_of::<[f32; 2]>();
 
         self.entries.insert(
             id,
             OverlayEntry {
                 point_buffer,
-                line_buffer,
+                stroke_buffer,
                 point_count: decoded.points.len() as u32,
-                line_vertex_count: decoded.lines.len() as u32,
+                stroke_vertex_count: decoded.strokes.len() as u32,
+                cells: decoded.cells,
+                polygon_points: decoded.polygon_points,
                 bytes: entry_bytes,
+                cpu_bytes,
                 last_used_frame: frame_index,
             },
         );
         self.bytes += entry_bytes;
+        self.cpu_bytes += cpu_bytes;
         Ok(())
     }
 
@@ -1527,6 +1861,7 @@ impl OverlayCache {
 
             if let Some(entry) = self.entries.remove(&id) {
                 self.bytes = self.bytes.saturating_sub(entry.bytes);
+                self.cpu_bytes = self.cpu_bytes.saturating_sub(entry.cpu_bytes);
             }
         }
     }
@@ -1534,16 +1869,41 @@ impl OverlayCache {
 
 struct OverlayEntry {
     point_buffer: wgpu::Buffer,
-    line_buffer: wgpu::Buffer,
+    stroke_buffer: wgpu::Buffer,
     point_count: u32,
-    line_vertex_count: u32,
+    stroke_vertex_count: u32,
+    cells: Vec<CellPickRecord>,
+    polygon_points: Vec<[f32; 2]>,
     bytes: usize,
+    cpu_bytes: usize,
     last_used_frame: u64,
+}
+
+impl OverlayEntry {
+    fn cell_contains_point(&self, cell: &CellPickRecord, x: f32, y: f32) -> bool {
+        let start = cell.vertex_offset as usize;
+        let len = usize::from(cell.vertex_count);
+
+        if len < 3 || start + len > self.polygon_points.len() {
+            return false;
+        }
+
+        point_in_polygon(x, y, &self.polygon_points[start..start + len])
+    }
+}
+
+#[derive(Clone)]
+struct CellHit {
+    cell_id: u64,
+    class_id: u32,
+    centroid: [f32; 2],
 }
 
 struct DecodedOverlayChunk {
     points: Vec<OverlayPointVertex>,
-    lines: Vec<OverlayLineVertex>,
+    strokes: Vec<OverlayStrokeVertex>,
+    cells: Vec<CellPickRecord>,
+    polygon_points: Vec<[f32; 2]>,
 }
 
 #[derive(Clone, Copy)]
@@ -1551,6 +1911,30 @@ struct OverlayCellHeader {
     class_id: u32,
     vertex_count: u16,
     vertex_offset: u32,
+}
+
+struct CellPickRecord {
+    cell_id: u64,
+    class_id: u32,
+    centroid: [f32; 2],
+    bbox: [f32; 4],
+    vertex_offset: u32,
+    vertex_count: u16,
+}
+
+impl CellPickRecord {
+    fn bbox_intersects_point(&self, x: f32, y: f32, padding: f32) -> bool {
+        x >= self.bbox[0] - padding
+            && x <= self.bbox[2] + padding
+            && y >= self.bbox[1] - padding
+            && y <= self.bbox[3] + padding
+    }
+
+    fn screen_distance_squared(&self, camera: &Camera, screen_x: f64, screen_y: f64) -> f64 {
+        let centroid =
+            camera.slide_to_screen(f64::from(self.centroid[0]), f64::from(self.centroid[1]));
+        (centroid.0 - screen_x).powi(2) + (centroid.1 - screen_y).powi(2)
+    }
 }
 
 fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverlayChunk, JsValue> {
@@ -1583,24 +1967,32 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
     let polygon_vertex_count = reader.read_u32()? as usize;
     let mut points = Vec::with_capacity(cell_count);
     let mut headers = Vec::with_capacity(cell_count);
+    let mut cells = Vec::with_capacity(cell_count);
 
     for _ in 0..cell_count {
-        let _cell_id = reader.read_u64()?;
+        let cell_id = reader.read_u64()?;
         let class_id = u32::from(reader.read_u16()?);
         let vertex_count = reader.read_u16()?;
         let _confidence = reader.read_f32()?;
         let centroid_x = reader.read_u16()?;
         let centroid_y = reader.read_u16()?;
         let vertex_offset = reader.read_u32()?;
-        let _bbox_min_x = reader.read_u16()?;
-        let _bbox_min_y = reader.read_u16()?;
-        let _bbox_max_x = reader.read_u16()?;
-        let _bbox_max_y = reader.read_u16()?;
+        let bbox_min_x = reader.read_u16()?;
+        let bbox_min_y = reader.read_u16()?;
+        let bbox_max_x = reader.read_u16()?;
+        let bbox_max_y = reader.read_u16()?;
+        let centroid = [
+            dequantize(centroid_x, origin_x, chunk_width),
+            dequantize(centroid_y, origin_y, chunk_height),
+        ];
+        let bbox = [
+            dequantize(bbox_min_x, origin_x, chunk_width),
+            dequantize(bbox_min_y, origin_y, chunk_height),
+            dequantize(bbox_max_x, origin_x, chunk_width),
+            dequantize(bbox_max_y, origin_y, chunk_height),
+        ];
         points.push(OverlayPointVertex {
-            position: [
-                dequantize(centroid_x, origin_x, chunk_width),
-                dequantize(centroid_y, origin_y, chunk_height),
-            ],
+            position: centroid,
             class_id,
             _pad: 0,
         });
@@ -1608,6 +2000,14 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
             class_id,
             vertex_count,
             vertex_offset,
+        });
+        cells.push(CellPickRecord {
+            cell_id,
+            class_id,
+            centroid,
+            bbox,
+            vertex_offset,
+            vertex_count,
         });
     }
 
@@ -1621,7 +2021,7 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
         ]);
     }
 
-    let mut lines = Vec::new();
+    let mut strokes = Vec::new();
     for header in headers {
         let start = header.vertex_offset as usize;
         let len = usize::from(header.vertex_count);
@@ -1633,20 +2033,98 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
         for index in 0..len {
             let a = polygon_points[start + index];
             let b = polygon_points[start + ((index + 1) % len)];
-            lines.push(OverlayLineVertex {
-                position: a,
-                class_id: header.class_id,
-                _pad: 0,
-            });
-            lines.push(OverlayLineVertex {
-                position: b,
-                class_id: header.class_id,
-                _pad: 0,
-            });
+            push_stroke_segment(&mut strokes, a, b, header.class_id);
         }
     }
 
-    Ok(DecodedOverlayChunk { points, lines })
+    Ok(DecodedOverlayChunk {
+        points,
+        strokes,
+        cells,
+        polygon_points,
+    })
+}
+
+fn push_stroke_segment(
+    strokes: &mut Vec<OverlayStrokeVertex>,
+    a: [f32; 2],
+    b: [f32; 2],
+    class_id: u32,
+) {
+    strokes.extend_from_slice(&[
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 0.0,
+            side: -1.0,
+            class_id,
+            _pad: 0,
+        },
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 1.0,
+            side: -1.0,
+            class_id,
+            _pad: 0,
+        },
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 1.0,
+            side: 1.0,
+            class_id,
+            _pad: 0,
+        },
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 0.0,
+            side: -1.0,
+            class_id,
+            _pad: 0,
+        },
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 1.0,
+            side: 1.0,
+            class_id,
+            _pad: 0,
+        },
+        OverlayStrokeVertex {
+            segment_start: a,
+            segment_end: b,
+            endpoint: 0.0,
+            side: 1.0,
+            class_id,
+            _pad: 0,
+        },
+    ]);
+}
+
+fn point_in_polygon(x: f32, y: f32, polygon: &[[f32; 2]]) -> bool {
+    let mut inside = false;
+    let mut j = polygon.len() - 1;
+
+    for i in 0..polygon.len() {
+        let yi = polygon[i][1];
+        let yj = polygon[j][1];
+
+        if (yi > y) != (yj > y) {
+            let xi = polygon[i][0];
+            let xj = polygon[j][0];
+            let intersection_x = (xj - xi) * (y - yi) / (yj - yi) + xi;
+
+            if x < intersection_x {
+                inside = !inside;
+            }
+        }
+
+        j = i;
+    }
+
+    inside
 }
 
 fn dequantize(value: u16, origin: f32, size: f32) -> f32 {
@@ -1985,8 +2463,8 @@ fn create_overlay_line_pipeline(
         "vs_overlay_line",
         "fs_point",
         format,
-        &[OverlayLineVertex::layout()],
-        wgpu::PrimitiveTopology::LineList,
+        &[OverlayStrokeVertex::layout()],
+        wgpu::PrimitiveTopology::TriangleList,
     )
 }
 
@@ -2048,6 +2526,7 @@ struct CameraUniform {
     _pad0: f32,
     viewport: [f32; 2],
     _pad1: [f32; 2],
+    overlay: [f32; 4],
 }
 
 #[repr(C)]
@@ -2121,15 +2600,50 @@ impl OverlayPointVertex {
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct OverlayLineVertex {
-    position: [f32; 2],
+struct OverlayStrokeVertex {
+    segment_start: [f32; 2],
+    segment_end: [f32; 2],
+    endpoint: f32,
+    side: f32,
     class_id: u32,
     _pad: u32,
 }
 
-impl OverlayLineVertex {
+impl OverlayStrokeVertex {
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        overlay_vertex_layout::<OverlayLineVertex>(wgpu::VertexStepMode::Vertex)
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<OverlayStrokeVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: (std::mem::size_of::<[f32; 2]>() * 2) as wgpu::BufferAddress,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: (std::mem::size_of::<[f32; 2]>() * 2 + std::mem::size_of::<f32>())
+                        as wgpu::BufferAddress,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: (std::mem::size_of::<[f32; 2]>() * 2 + std::mem::size_of::<f32>() * 2)
+                        as wgpu::BufferAddress,
+                    shader_location: 4,
+                },
+            ],
+        }
     }
 }
 
