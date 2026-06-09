@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fovea Phase 0</title>
+  </head>
+  <body>
+    <main id="app">
+      <canvas id="viewer"></canvas>
+      <section class="toolbar" aria-label="Benchmark controls">
+        <label>
+          Points
+          <select id="point-count">
+            <option value="10000">10k</option>
+            <option value="100000" selected>100k</option>
+            <option value="500000">500k</option>
+            <option value="1000000">1M</option>
+          </select>
+        </label>
+        <button id="reset-camera" type="button">Reset</button>
+      </section>
+      <section class="stats" aria-live="polite">
+        <div><span>FPS</span><strong id="fps">0</strong></div>
+        <div><span>p50</span><strong id="p50">0 ms</strong></div>
+        <div><span>p95</span><strong id="p95">0 ms</strong></div>
+        <div><span>p99</span><strong id="p99">0 ms</strong></div>
+        <div><span>Frame</span><strong id="frame">0 ms</strong></div>
+        <div><span>Upload</span><strong id="upload">0 ms</strong></div>
+        <div><span>Draws</span><strong id="draws">0</strong></div>
+        <div><span>Visible</span><strong id="visible">0</strong></div>
+        <div><span>GPU buffers</span><strong id="gpu">0 MB</strong></div>
+        <div><span>CPU temp</span><strong id="cpu">0 MB</strong></div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
+
