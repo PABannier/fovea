@@ -7,8 +7,15 @@ const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
 const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
 const overlayForm = document.querySelector<HTMLFormElement>("#overlay-form");
 const overlayInput = document.querySelector<HTMLInputElement>("#overlay-url");
+const heatmapForm = document.querySelector<HTMLFormElement>("#heatmap-form");
+const heatmapInput = document.querySelector<HTMLInputElement>("#heatmap-url");
 const overlayVisible = document.querySelector<HTMLInputElement>("#overlay-visible");
 const overlayOpacity = document.querySelector<HTMLInputElement>("#overlay-opacity");
+const heatmapVisible = document.querySelector<HTMLInputElement>("#heatmap-visible");
+const heatmapOpacity = document.querySelector<HTMLInputElement>("#heatmap-opacity");
+const heatmapMin = document.querySelector<HTMLInputElement>("#heatmap-min");
+const heatmapMax = document.querySelector<HTMLInputElement>("#heatmap-max");
+const heatmapColormap = document.querySelector<HTMLSelectElement>("#heatmap-colormap");
 const loadStatus = document.querySelector<HTMLElement>("#load-status");
 
 if (
@@ -18,8 +25,15 @@ if (
   !bundleInput ||
   !overlayForm ||
   !overlayInput ||
+  !heatmapForm ||
+  !heatmapInput ||
   !overlayVisible ||
   !overlayOpacity ||
+  !heatmapVisible ||
+  !heatmapOpacity ||
+  !heatmapMin ||
+  !heatmapMax ||
+  !heatmapColormap ||
   !loadStatus
 ) {
   throw new Error("Fovea example DOM is incomplete");
@@ -31,11 +45,19 @@ const bundleUrlForm = bundleForm;
 const bundleUrlInput = bundleInput;
 const overlayUrlForm = overlayForm;
 const overlayUrlInput = overlayInput;
+const heatmapUrlForm = heatmapForm;
+const heatmapUrlInput = heatmapInput;
 const overlayVisibleInput = overlayVisible;
 const overlayOpacityInput = overlayOpacity;
+const heatmapVisibleInput = heatmapVisible;
+const heatmapOpacityInput = heatmapOpacity;
+const heatmapMinInput = heatmapMin;
+const heatmapMaxInput = heatmapMax;
+const heatmapColormapSelect = heatmapColormap;
 const bundleLoadStatus = loadStatus;
 let slideLoaded = false;
 let overlayLoaded = false;
+let heatmapLoaded = false;
 
 const values = {
   fps: document.querySelector<HTMLElement>("#fps"),
@@ -70,6 +92,7 @@ function formatBytes(value: number): string {
 async function main(): Promise<void> {
   const bundleParam = new URLSearchParams(window.location.search).get("bundle");
   const overlayParam = new URLSearchParams(window.location.search).get("overlay");
+  const heatmapParam = new URLSearchParams(window.location.search).get("heatmap");
 
   if (bundleParam) {
     bundleUrlInput.value = bundleParam;
@@ -77,6 +100,10 @@ async function main(): Promise<void> {
 
   if (overlayParam) {
     overlayUrlInput.value = overlayParam;
+  }
+
+  if (heatmapParam) {
+    heatmapUrlInput.value = heatmapParam;
   }
 
   const viewer = await FoveaViewer.create({
@@ -102,6 +129,20 @@ async function main(): Promise<void> {
   overlayOpacityInput.addEventListener("input", () => {
     viewer.setLayerOpacity("cells", Number(overlayOpacityInput.value));
   });
+  heatmapVisibleInput.addEventListener("change", () => {
+    viewer.setLayerVisibility("heatmap", heatmapVisibleInput.checked);
+  });
+  heatmapOpacityInput.addEventListener("input", () => {
+    viewer.setLayerOpacity("heatmap", Number(heatmapOpacityInput.value));
+  });
+  heatmapMinInput.addEventListener("input", () => updateHeatmapRange(viewer));
+  heatmapMaxInput.addEventListener("input", () => updateHeatmapRange(viewer));
+  heatmapColormapSelect.addEventListener("change", () => {
+    viewer.setHeatmapColormap(
+      "heatmap",
+      heatmapColormapSelect.value as "magma" | "viridis" | "gray"
+    );
+  });
   viewer.on("cell-hover", (event) => {
     if (event.cellId == null) {
       setText("cell", "None");
@@ -121,15 +162,24 @@ async function main(): Promise<void> {
     void loadOverlayFromInput(viewer);
   });
 
+  heatmapUrlForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void loadHeatmapFromInput(viewer);
+  });
+
+  viewer.start();
+
   if (bundleUrlInput.value.trim()) {
-    await loadBundleFromInput(viewer);
+    void loadBundleFromInput(viewer);
   }
 
   if (overlayUrlInput.value.trim()) {
-    await loadOverlayFromInput(viewer);
+    void loadOverlayFromInput(viewer);
   }
 
-  viewer.start();
+  if (heatmapUrlInput.value.trim()) {
+    void loadHeatmapFromInput(viewer);
+  }
 }
 
 async function loadBundleFromInput(viewer: FoveaViewer): Promise<void> {
@@ -148,7 +198,7 @@ async function loadBundleFromInput(viewer: FoveaViewer): Promise<void> {
   } catch (error) {
     slideLoaded = false;
     bundleLoadStatus.textContent = "Load failed";
-    throw error;
+    console.error(error);
   }
 }
 
@@ -168,17 +218,52 @@ async function loadOverlayFromInput(viewer: FoveaViewer): Promise<void> {
   } catch (error) {
     overlayLoaded = false;
     bundleLoadStatus.textContent = "Overlay failed";
-    throw error;
+    console.error(error);
   }
 }
 
+async function loadHeatmapFromInput(viewer: FoveaViewer): Promise<void> {
+  const heatmapUrl = heatmapUrlInput.value.trim();
+
+  if (!heatmapUrl) {
+    return;
+  }
+
+  bundleLoadStatus.textContent = "Heatmap";
+
+  try {
+    await viewer.loadHeatmap(heatmapUrl);
+    heatmapLoaded = true;
+    updateLoadStatus();
+  } catch (error) {
+    heatmapLoaded = false;
+    bundleLoadStatus.textContent = "Heatmap failed";
+    console.error(error);
+  }
+}
+
+function updateHeatmapRange(viewer: FoveaViewer): void {
+  const min = Number(heatmapMinInput.value);
+  const max = Number(heatmapMaxInput.value);
+  viewer.setHeatmapRange("heatmap", {
+    min: Math.min(min, max - 0.01),
+    max: Math.max(max, min + 0.01)
+  });
+}
+
 function updateLoadStatus(): void {
-  if (slideLoaded && overlayLoaded) {
+  if (slideLoaded && overlayLoaded && heatmapLoaded) {
+    bundleLoadStatus.textContent = "Slide + cells + heatmap";
+  } else if (slideLoaded && overlayLoaded) {
     bundleLoadStatus.textContent = "Slide + cells";
+  } else if (slideLoaded && heatmapLoaded) {
+    bundleLoadStatus.textContent = "Slide + heatmap";
   } else if (slideLoaded) {
     bundleLoadStatus.textContent = "Slide";
   } else if (overlayLoaded) {
     bundleLoadStatus.textContent = "Cells";
+  } else if (heatmapLoaded) {
+    bundleLoadStatus.textContent = "Heatmap";
   } else {
     bundleLoadStatus.textContent = "Synthetic";
   }

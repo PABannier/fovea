@@ -1,8 +1,10 @@
+mod heatmap;
 mod manifest;
 mod overlay;
 mod packer;
 mod reader;
 
+pub use heatmap::{pack_heatmap_from_cell_overlay, HeatmapOverlayPackOptions};
 pub use manifest::{
     AssociatedImageManifest, Bounds, ImageFormat, LevelManifest, Manifest, Metadata, Size,
     TileManifest,

@@ -29,6 +29,16 @@
           />
           <button id="load-overlay" type="submit">Overlay</button>
         </form>
+        <form id="heatmap-form" class="bundle-form">
+          <input
+            id="heatmap-url"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="/@fs/.../cell-density.heatmap"
+          />
+          <button id="load-heatmap" type="submit">Heatmap</button>
+        </form>
         <button id="reset-camera" type="button">Reset</button>
         <label class="cell-toggle">
           <input id="overlay-visible" type="checkbox" checked />
@@ -37,6 +47,27 @@
         <label class="opacity-control">
           Opacity
           <input id="overlay-opacity" type="range" min="0" max="1" step="0.01" value="0.78" />
+        </label>
+        <label class="cell-toggle">
+          <input id="heatmap-visible" type="checkbox" checked />
+          Heatmap
+        </label>
+        <label class="opacity-control">
+          Opacity
+          <input id="heatmap-opacity" type="range" min="0" max="1" step="0.01" value="0.4" />
+        </label>
+        <label class="opacity-control">
+          Range
+          <input id="heatmap-min" type="range" min="0" max="1" step="0.01" value="0.05" />
+          <input id="heatmap-max" type="range" min="0" max="1" step="0.01" value="1" />
+        </label>
+        <label>
+          Map
+          <select id="heatmap-colormap">
+            <option value="magma">Magma</option>
+            <option value="viridis">Viridis</option>
+            <option value="gray">Gray</option>
+          </select>
         </label>
         <span id="load-status" class="load-status">Synthetic</span>
       </section>

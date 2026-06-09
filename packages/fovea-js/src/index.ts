@@ -10,10 +10,13 @@ export interface FoveaViewerOptions {
   pointCount?: BenchmarkPointCount;
   bundleUrl?: string;
   overlayUrl?: string;
+  heatmapUrl?: string;
   tileRequestBatchSize?: number;
   overlayRequestBatchSize?: number;
+  heatmapRequestBatchSize?: number;
   maxConcurrentTileRequests?: number;
   maxConcurrentOverlayRequests?: number;
+  maxConcurrentHeatmapRequests?: number;
   onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 }
 
@@ -75,21 +78,37 @@ interface OverlayChunkRequest {
   priority: number;
 }
 
+interface HeatmapTileRequest {
+  level: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  path: string;
+  byteSize: number;
+  priority: number;
+}
+
 export class FoveaViewer {
   private animationFrame = 0;
   private destroyed = false;
   private bundleVersion = 0;
   private overlayVersion = 0;
+  private heatmapVersion = 0;
   private tileBaseUrl: string | null = null;
   private overlayBaseUrl: string | null = null;
+  private heatmapBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
   private pointerDown: { clientX: number; clientY: number } | null = null;
   private readonly tileRequestBatchSize: number;
   private readonly overlayRequestBatchSize: number;
+  private readonly heatmapRequestBatchSize: number;
   private readonly maxConcurrentTileRequests: number;
   private readonly maxConcurrentOverlayRequests: number;
+  private readonly maxConcurrentHeatmapRequests: number;
   private readonly inflightTiles = new Map<string, AbortController>();
   private readonly inflightOverlayChunks = new Map<string, AbortController>();
+  private readonly inflightHeatmapTiles = new Map<string, AbortController>();
   private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
@@ -101,8 +120,10 @@ export class FoveaViewer {
   ) {
     this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
     this.overlayRequestBatchSize = options.overlayRequestBatchSize ?? 64;
+    this.heatmapRequestBatchSize = options.heatmapRequestBatchSize ?? 64;
     this.maxConcurrentTileRequests = options.maxConcurrentTileRequests ?? 8;
     this.maxConcurrentOverlayRequests = options.maxConcurrentOverlayRequests ?? 6;
+    this.maxConcurrentHeatmapRequests = options.maxConcurrentHeatmapRequests ?? 6;
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.bindInput();
@@ -130,6 +151,10 @@ export class FoveaViewer {
       await viewer.loadOverlay(options.overlayUrl);
     }
 
+    if (options.heatmapUrl) {
+      await viewer.loadHeatmap(options.heatmapUrl);
+    }
+
     return viewer;
   }
 
@@ -144,6 +169,7 @@ export class FoveaViewer {
       }
 
       this.pumpTileRequests();
+      this.pumpHeatmapRequests();
       this.pumpOverlayRequests();
       const stats = this.wasm.render();
       this.dispatchDrainedEvents();
@@ -166,6 +192,7 @@ export class FoveaViewer {
     this.stop();
     this.abortInflightTiles();
     this.abortInflightOverlayChunks();
+    this.abortInflightHeatmapTiles();
     this.resizeObserver.disconnect();
   }
 
@@ -213,24 +240,54 @@ export class FoveaViewer {
     this.frameTimes.length = 0;
   }
 
+  async loadHeatmap(heatmapUrl: string): Promise<void> {
+    const version = ++this.heatmapVersion;
+    this.abortInflightHeatmapTiles();
+
+    const manifestUrl = manifestUrlForBundle(heatmapUrl);
+    const response = await fetch(manifestUrl, { cache: "no-cache" });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch heatmap manifest: ${response.status} ${response.statusText}`);
+    }
+
+    const manifestJson = await response.text();
+
+    if (version !== this.heatmapVersion || this.destroyed) {
+      return;
+    }
+
+    this.heatmapBaseUrl = new URL(".", manifestUrl).toString();
+    this.wasm.loadHeatmapManifest(manifestJson);
+    this.frameTimes.length = 0;
+  }
+
   setPointCount(count: BenchmarkPointCount): void {
     this.wasm.setPointCount(count);
   }
 
-  setLayerVisibility(layerId: "cells", visible: boolean): void {
-    if (layerId !== "cells") {
-      return;
+  setLayerVisibility(layerId: "cells" | "heatmap" | string, visible: boolean): void {
+    if (layerId === "cells") {
+      this.wasm.setOverlayVisibility(visible);
+    } else {
+      this.wasm.setHeatmapVisibility(visible);
     }
-
-    this.wasm.setOverlayVisibility(visible);
   }
 
-  setLayerOpacity(layerId: "cells", opacity: number): void {
-    if (layerId !== "cells") {
-      return;
+  setLayerOpacity(layerId: "cells" | "heatmap" | string, opacity: number): void {
+    if (layerId === "cells") {
+      this.wasm.setOverlayOpacity(opacity);
+    } else {
+      this.wasm.setHeatmapOpacity(opacity);
     }
+  }
 
-    this.wasm.setOverlayOpacity(opacity);
+  setHeatmapRange(_layerId: "heatmap" | string, range: { min: number; max: number }): void {
+    this.wasm.setHeatmapRange(range.min, range.max);
+  }
+
+  setHeatmapColormap(_layerId: "heatmap" | string, colormap: "magma" | "viridis" | "gray"): void {
+    this.wasm.setHeatmapColormap(colormap);
   }
 
   setOverlayPointSize(sizePx: number): void {
@@ -290,10 +347,10 @@ export class FoveaViewer {
         return;
       }
 
-      const dpr = window.devicePixelRatio || 1;
+      const scale = this.canvasScale();
       this.wasm.panByScreenDelta(
-        (event.clientX - this.lastPointer.clientX) * dpr,
-        (event.clientY - this.lastPointer.clientY) * dpr
+        (event.clientX - this.lastPointer.clientX) * scale.x,
+        (event.clientY - this.lastPointer.clientY) * scale.y
       );
       this.lastPointer = event;
     });
@@ -325,11 +382,10 @@ export class FoveaViewer {
       "wheel",
       (event) => {
         event.preventDefault();
-        const rect = this.canvas.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
+        const point = this.eventCanvasPoint(event);
         this.wasm.zoomAt(
-          (event.clientX - rect.left) * dpr,
-          (event.clientY - rect.top) * dpr,
+          point.x,
+          point.y,
           event.deltaY
         );
       },
@@ -347,13 +403,20 @@ export class FoveaViewer {
     this.wasm.clickAt(point.x, point.y);
   }
 
-  private eventCanvasPoint(event: PointerEvent): { x: number; y: number } {
+  private eventCanvasPoint(event: Pick<MouseEvent, "clientX" | "clientY">): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
+    const scale = this.canvasScale(rect);
 
     return {
-      x: (event.clientX - rect.left) * dpr,
-      y: (event.clientY - rect.top) * dpr
+      x: (event.clientX - rect.left) * scale.x,
+      y: (event.clientY - rect.top) * scale.y
+    };
+  }
+
+  private canvasScale(rect = this.canvas.getBoundingClientRect()): { x: number; y: number } {
+    return {
+      x: this.canvas.width / Math.max(1, rect.width),
+      y: this.canvas.height / Math.max(1, rect.height)
     };
   }
 
@@ -452,6 +515,97 @@ export class FoveaViewer {
           }
         });
     }
+  }
+
+  private pumpHeatmapRequests(): void {
+    if (!this.heatmapBaseUrl || this.destroyed) {
+      return;
+    }
+
+    const requests = this.parseVisibleHeatmapTileRequests();
+    const wanted = new Set(requests.map((request) => heatmapTileKey(request)));
+
+    for (const [key, controller] of this.inflightHeatmapTiles) {
+      if (!wanted.has(key)) {
+        controller.abort();
+        this.inflightHeatmapTiles.delete(key);
+      }
+    }
+
+    for (const request of requests) {
+      if (this.inflightHeatmapTiles.size >= this.maxConcurrentHeatmapRequests) {
+        break;
+      }
+
+      const key = heatmapTileKey(request);
+
+      if (this.inflightHeatmapTiles.has(key)) {
+        continue;
+      }
+
+      const controller = new AbortController();
+      const version = this.heatmapVersion;
+      this.inflightHeatmapTiles.set(key, controller);
+      void this.loadHeatmapTile(request, controller, version)
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) {
+            console.error(error);
+          }
+        })
+        .finally(() => {
+          if (this.inflightHeatmapTiles.get(key) === controller) {
+            this.inflightHeatmapTiles.delete(key);
+          }
+        });
+    }
+  }
+
+  private parseVisibleHeatmapTileRequests(): HeatmapTileRequest[] {
+    const raw = this.wasm.visibleHeatmapTileRequests(this.heatmapRequestBatchSize);
+
+    try {
+      const requests = JSON.parse(raw) as HeatmapTileRequest[];
+      return requests.sort((a, b) => a.priority - b.priority);
+    } catch {
+      return [];
+    }
+  }
+
+  private async loadHeatmapTile(
+    request: HeatmapTileRequest,
+    controller: AbortController,
+    version: number
+  ): Promise<void> {
+    const heatmapBaseUrl = this.heatmapBaseUrl;
+
+    if (!heatmapBaseUrl) {
+      return;
+    }
+
+    const tileUrl = new URL(request.path, heatmapBaseUrl);
+    const response = await fetch(tileUrl, {
+      cache: "force-cache",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch heatmap tile ${request.path}: ${response.status}`);
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+
+    if (controller.signal.aborted || version !== this.heatmapVersion || this.destroyed) {
+      return;
+    }
+
+    this.wasm.uploadHeatmapTileBytes(
+      request.level,
+      request.x,
+      request.y,
+      request.width,
+      request.height,
+      bytes
+    );
   }
 
   private parseVisibleOverlayChunkRequests(): OverlayChunkRequest[] {
@@ -622,6 +776,14 @@ export class FoveaViewer {
 
     this.inflightOverlayChunks.clear();
   }
+
+  private abortInflightHeatmapTiles(): void {
+    for (const controller of this.inflightHeatmapTiles.values()) {
+      controller.abort();
+    }
+
+    this.inflightHeatmapTiles.clear();
+  }
 }
 
 export type { FrameStats };
@@ -643,6 +805,10 @@ function tileKey(request: TileRequest): string {
 
 function overlayChunkKey(request: OverlayChunkRequest): string {
   return `${request.x}/${request.y}`;
+}
+
+function heatmapTileKey(request: HeatmapTileRequest): string {
+  return `${request.level}/${request.x}/${request.y}`;
 }
 
 function decodeBitmapRgba(

@@ -3,7 +3,9 @@ struct Camera {
   zoom: f32,
   _pad0: f32,
   viewport: vec2<f32>,
+  _pad1: vec2<f32>,
   overlay: vec4<f32>,
+  heatmap: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -64,6 +66,65 @@ fn vs_tile(@location(0) world_position: vec2<f32>, @location(1) uv: vec2<f32>) -
 @fragment
 fn fs_tile(input: VertexOut) -> @location(0) vec4<f32> {
   return textureSample(quad_texture, quad_sampler, input.uv);
+}
+
+fn magma_colormap(value: f32) -> vec3<f32> {
+  let v = clamp(value, 0.0, 1.0);
+  let c0 = vec3<f32>(0.0015, 0.0005, 0.0139);
+  let c1 = vec3<f32>(0.2515, 0.0714, 0.4854);
+  let c2 = vec3<f32>(0.7164, 0.2140, 0.4753);
+  let c3 = vec3<f32>(0.9867, 0.5356, 0.3822);
+  let c4 = vec3<f32>(0.9871, 0.9914, 0.7495);
+
+  if v < 0.25 {
+    return mix(c0, c1, v / 0.25);
+  }
+  if v < 0.5 {
+    return mix(c1, c2, (v - 0.25) / 0.25);
+  }
+  if v < 0.75 {
+    return mix(c2, c3, (v - 0.5) / 0.25);
+  }
+  return mix(c3, c4, (v - 0.75) / 0.25);
+}
+
+fn viridis_colormap(value: f32) -> vec3<f32> {
+  let v = clamp(value, 0.0, 1.0);
+  let c0 = vec3<f32>(0.2670, 0.0049, 0.3294);
+  let c1 = vec3<f32>(0.2297, 0.3224, 0.5457);
+  let c2 = vec3<f32>(0.1276, 0.5669, 0.5506);
+  let c3 = vec3<f32>(0.3692, 0.7889, 0.3829);
+  let c4 = vec3<f32>(0.9932, 0.9062, 0.1439);
+
+  if v < 0.25 {
+    return mix(c0, c1, v / 0.25);
+  }
+  if v < 0.5 {
+    return mix(c1, c2, (v - 0.25) / 0.25);
+  }
+  if v < 0.75 {
+    return mix(c2, c3, (v - 0.5) / 0.25);
+  }
+  return mix(c3, c4, (v - 0.75) / 0.25);
+}
+
+fn heatmap_color(value: f32, colormap_id: f32) -> vec3<f32> {
+  if colormap_id > 1.5 {
+    return vec3<f32>(value);
+  }
+  if colormap_id > 0.5 {
+    return viridis_colormap(value);
+  }
+  return magma_colormap(value);
+}
+
+@fragment
+fn fs_heatmap(input: VertexOut) -> @location(0) vec4<f32> {
+  let raw = textureSample(quad_texture, quad_sampler, input.uv).r;
+  let range = max(camera.heatmap.z - camera.heatmap.y, 0.0001);
+  let value = clamp((raw - camera.heatmap.y) / range, 0.0, 1.0);
+  let alpha = clamp(camera.heatmap.x, 0.0, 1.0) * smoothstep(0.001, 0.08, value);
+  return vec4<f32>(heatmap_color(value, camera.heatmap.w), alpha);
 }
 
 @vertex

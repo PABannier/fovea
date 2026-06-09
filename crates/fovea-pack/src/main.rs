@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use fovea_pack::{
-    pack_cells_protobuf, pack_slide, CellOverlayPackOptions, ImageFormat, PackOptions,
+    pack_cells_protobuf, pack_heatmap_from_cell_overlay, pack_slide, CellOverlayPackOptions,
+    HeatmapOverlayPackOptions, ImageFormat, PackOptions,
 };
 
 #[derive(Debug, Parser)]
@@ -23,6 +24,8 @@ enum Command {
     Slide(SlideArgs),
     /// Convert a histotyper SlideSegmentationData protobuf into Fovea overlay chunks.
     CellsProtobuf(CellsProtobufArgs),
+    /// Convert a Fovea cell overlay bundle into tiled density heatmap tiles.
+    HeatmapOverlay(HeatmapOverlayArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -87,6 +90,33 @@ struct CellsProtobufArgs {
     force: bool,
 }
 
+#[derive(Debug, Parser)]
+struct HeatmapOverlayArgs {
+    /// Input .overlay bundle created by the cells-protobuf command.
+    #[arg(long)]
+    overlay: PathBuf,
+
+    /// Output heatmap bundle directory.
+    #[arg(long)]
+    out: PathBuf,
+
+    /// Heatmap id written into the manifest.
+    #[arg(long, default_value = "cell_density")]
+    id: String,
+
+    /// Level-0 slide pixels represented by one heatmap pixel.
+    #[arg(long, default_value_t = 128)]
+    bin_size: u32,
+
+    /// Output heatmap tile edge length in heatmap pixels.
+    #[arg(long, default_value_t = 256)]
+    tile_size: u32,
+
+    /// Remove an existing output bundle before writing.
+    #[arg(long)]
+    force: bool,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliImageFormat {
     Webp,
@@ -126,5 +156,15 @@ fn main() -> Result<()> {
             max_vertices_per_cell: args.max_vertices_per_cell,
             force: args.force,
         }),
+        Command::HeatmapOverlay(args) => {
+            pack_heatmap_from_cell_overlay(HeatmapOverlayPackOptions {
+                overlay_dir: args.overlay,
+                out_dir: args.out,
+                id: args.id,
+                bin_size: args.bin_size,
+                tile_size: args.tile_size,
+                force: args.force,
+            })
+        }
     }
 }

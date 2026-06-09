@@ -16,6 +16,8 @@ const TILE_CACHE_SOFT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const TILE_CACHE_HARD_LIMIT_BYTES: usize = 384 * 1024 * 1024;
 const OVERLAY_CACHE_SOFT_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 const OVERLAY_CACHE_HARD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
+const HEATMAP_CACHE_SOFT_LIMIT_BYTES: usize = 96 * 1024 * 1024;
+const HEATMAP_CACHE_HARD_LIMIT_BYTES: usize = 160 * 1024 * 1024;
 const POLYGON_OUTLINE_MIN_ZOOM: f64 = 0.05;
 const OVERLAY_PICK_RADIUS_PX: f64 = 8.0;
 const OVERLAY_HOVER_CLASS_ID: u32 = u32::MAX;
@@ -150,6 +152,24 @@ impl FoveaViewer {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = loadHeatmapManifest)]
+    pub fn load_heatmap_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
+        let manifest = HeatmapManifest::from_json(manifest_json)?;
+        let should_fit_heatmap = self.renderer.slide_dimensions().is_none();
+        let dimensions = manifest.dimensions();
+        self.renderer.set_heatmap_manifest(manifest);
+        if should_fit_heatmap {
+            self.camera = Camera::fit_dimensions(
+                self.renderer.width,
+                self.renderer.height,
+                dimensions.0,
+                dimensions.1,
+            );
+            self.renderer.write_camera(&self.camera);
+        }
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = visibleOverlayChunkRequests)]
     pub fn visible_overlay_chunk_requests(&self, max_requests: u32) -> String {
         self.renderer
@@ -166,6 +186,27 @@ impl FoveaViewer {
     ) -> Result<(), JsValue> {
         self.renderer
             .upload_overlay_chunk_bytes(OverlayChunkId { x, y }, bytes)
+    }
+
+    #[wasm_bindgen(js_name = visibleHeatmapTileRequests)]
+    pub fn visible_heatmap_tile_requests(&self, max_requests: u32) -> String {
+        self.renderer
+            .visible_heatmap_tile_requests(&self.camera, max_requests as usize)
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    #[wasm_bindgen(js_name = uploadHeatmapTileBytes)]
+    pub fn upload_heatmap_tile_bytes(
+        &mut self,
+        level: u32,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .upload_heatmap_tile_bytes(TileId { level, x, y }, width, height, bytes)
     }
 
     #[wasm_bindgen(js_name = setOverlayVisibility)]
@@ -199,6 +240,30 @@ impl FoveaViewer {
     #[wasm_bindgen(js_name = setOverlayOutlineWidth)]
     pub fn set_overlay_outline_width(&mut self, width_px: f64) {
         self.renderer.set_overlay_outline_width(width_px);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setHeatmapVisibility)]
+    pub fn set_heatmap_visibility(&mut self, visible: bool) {
+        self.renderer.set_heatmap_visibility(visible);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setHeatmapOpacity)]
+    pub fn set_heatmap_opacity(&mut self, opacity: f64) {
+        self.renderer.set_heatmap_opacity(opacity);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setHeatmapRange)]
+    pub fn set_heatmap_range(&mut self, min: f64, max: f64) {
+        self.renderer.set_heatmap_range(min, max);
+        self.renderer.write_camera(&self.camera);
+    }
+
+    #[wasm_bindgen(js_name = setHeatmapColormap)]
+    pub fn set_heatmap_colormap(&mut self, colormap: &str) {
+        self.renderer.set_heatmap_colormap(colormap);
         self.renderer.write_camera(&self.camera);
     }
 
@@ -400,7 +465,11 @@ impl Camera {
         self.center_y = self.center_y.clamp(min_y, max_y);
     }
 
-    fn as_uniform(&self, overlay_style: OverlayStyle) -> CameraUniform {
+    fn as_uniform_with_heatmap(
+        &self,
+        overlay_style: OverlayStyle,
+        heatmap_style: HeatmapStyle,
+    ) -> CameraUniform {
         CameraUniform {
             center: [self.center_x as f32, self.center_y as f32],
             zoom: self.zoom as f32,
@@ -415,6 +484,16 @@ impl Camera {
                 overlay_style.point_size_px,
                 overlay_style.outline_width_px,
                 if overlay_style.visible { 1.0 } else { 0.0 },
+            ],
+            heatmap: [
+                if heatmap_style.visible {
+                    heatmap_style.opacity
+                } else {
+                    0.0
+                },
+                heatmap_style.range_min,
+                heatmap_style.range_max,
+                heatmap_style.colormap_id,
             ],
         }
     }
@@ -492,6 +571,40 @@ struct TileManifest {
     skipped: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHeatmapManifest {
+    id: String,
+    width: u32,
+    height: u32,
+    tile_size: u32,
+    levels: Vec<HeatmapLevelManifest>,
+    tiles: Vec<HeatmapTileManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeatmapLevelManifest {
+    index: u32,
+    width: u32,
+    height: u32,
+    downsample: f64,
+    tile_cols: u32,
+    tile_rows: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HeatmapTileManifest {
+    level: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    path: String,
+    byte_size: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TileRequest {
@@ -544,6 +657,19 @@ struct OverlayChunkRequest {
     priority: f64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HeatmapTileRequest {
+    level: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    path: String,
+    byte_size: u64,
+    priority: f64,
+}
+
 #[derive(Clone)]
 struct CellOverlayManifest {
     #[allow(dead_code)]
@@ -553,6 +679,150 @@ struct CellOverlayManifest {
     chunk_width: u32,
     chunk_height: u32,
     chunks: HashMap<OverlayChunkId, CellChunkManifest>,
+}
+
+#[derive(Clone)]
+struct HeatmapManifest {
+    #[allow(dead_code)]
+    id: String,
+    width: f64,
+    height: f64,
+    tile_size: u32,
+    levels: Vec<LevelManifest>,
+    tiles: HashMap<TileId, HeatmapTileManifest>,
+}
+
+impl HeatmapManifest {
+    fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
+        let raw: RawHeatmapManifest = serde_json::from_str(manifest_json).map_err(|err| {
+            JsValue::from_str(&format!("failed to parse heatmap manifest: {err}"))
+        })?;
+        let mut tiles = HashMap::new();
+
+        for tile in raw.tiles {
+            tiles.insert(
+                TileId {
+                    level: tile.level,
+                    x: tile.x,
+                    y: tile.y,
+                },
+                tile,
+            );
+        }
+
+        if raw.levels.is_empty() {
+            return Err(JsValue::from_str("heatmap manifest has no pyramid levels"));
+        }
+
+        let levels = raw
+            .levels
+            .into_iter()
+            .map(|level| LevelManifest {
+                index: level.index,
+                width: level.width,
+                height: level.height,
+                downsample: level.downsample,
+                tile_cols: level.tile_cols,
+                tile_rows: level.tile_rows,
+            })
+            .collect();
+
+        Ok(Self {
+            id: raw.id,
+            width: raw.width as f64,
+            height: raw.height as f64,
+            tile_size: raw.tile_size,
+            levels,
+            tiles,
+        })
+    }
+
+    fn dimensions(&self) -> (f64, f64) {
+        (self.width, self.height)
+    }
+
+    fn best_level(&self, camera: &Camera) -> &LevelManifest {
+        self.levels
+            .iter()
+            .min_by(|left, right| {
+                let left_error = (camera.zoom * left.downsample).log2().abs();
+                let right_error = (camera.zoom * right.downsample).log2().abs();
+                left_error
+                    .partial_cmp(&right_error)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(&self.levels[0])
+    }
+
+    fn visible_tiles(&self, camera: &Camera, level: &LevelManifest) -> Vec<VisibleTile> {
+        let visible = camera.visible_rect();
+
+        if visible.width <= 0.0 || visible.height <= 0.0 {
+            return Vec::new();
+        }
+
+        let tile_size = f64::from(self.tile_size);
+        let min_x = (visible.x / level.downsample).floor().max(0.0);
+        let min_y = (visible.y / level.downsample).floor().max(0.0);
+        let max_x = (visible.right() / level.downsample)
+            .ceil()
+            .min(f64::from(level.width));
+        let max_y = (visible.bottom() / level.downsample)
+            .ceil()
+            .min(f64::from(level.height));
+
+        if max_x <= min_x || max_y <= min_y {
+            return Vec::new();
+        }
+
+        let min_tile_x = (min_x / tile_size).floor() as u32;
+        let min_tile_y = (min_y / tile_size).floor() as u32;
+        let max_tile_x = ((max_x - 1.0) / tile_size).floor() as u32;
+        let max_tile_y = ((max_y - 1.0) / tile_size).floor() as u32;
+        let center = visible.center();
+        let mut tiles = Vec::new();
+
+        for y in min_tile_y..=max_tile_y.min(level.tile_rows.saturating_sub(1)) {
+            for x in min_tile_x..=max_tile_x.min(level.tile_cols.saturating_sub(1)) {
+                let id = TileId {
+                    level: level.index,
+                    x,
+                    y,
+                };
+                let Some(tile) = self.tiles.get(&id) else {
+                    continue;
+                };
+                let rect = self.tile_world_rect(level, tile);
+                let tile_center = rect.center();
+                let distance =
+                    (tile_center.0 - center.0).powi(2) + (tile_center.1 - center.1).powi(2);
+
+                tiles.push(VisibleTile { id, rect, distance });
+            }
+        }
+
+        tiles.sort_by(|left, right| {
+            left.distance
+                .partial_cmp(&right.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        tiles
+    }
+
+    fn tile_world_rect(&self, level: &LevelManifest, tile: &HeatmapTileManifest) -> Rect {
+        let x = f64::from(tile.x * self.tile_size) * level.downsample;
+        let y = f64::from(tile.y * self.tile_size) * level.downsample;
+        let width = f64::from(tile.width) * level.downsample;
+        let height = f64::from(tile.height) * level.downsample;
+
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+        .clamped(self.width, self.height)
+    }
 }
 
 impl CellOverlayManifest {
@@ -806,6 +1076,7 @@ struct Renderer {
     height: u32,
     triangle_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
+    heatmap_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
     overlay_point_pipeline: wgpu::RenderPipeline,
     overlay_line_pipeline: wgpu::RenderPipeline,
@@ -816,9 +1087,12 @@ struct Renderer {
     point_count: u32,
     slide_manifest: Option<SlideManifest>,
     cell_overlay_manifest: Option<CellOverlayManifest>,
+    heatmap_manifest: Option<HeatmapManifest>,
     texture_cache: TextureCache,
+    heatmap_cache: TextureCache,
     overlay_cache: OverlayCache,
     overlay_style: OverlayStyle,
+    heatmap_style: HeatmapStyle,
     hovered_cell: Option<CellHit>,
     selected_cell: Option<CellHit>,
     frame_index: u64,
@@ -833,6 +1107,27 @@ struct OverlayStyle {
     opacity: f32,
     point_size_px: f32,
     outline_width_px: f32,
+}
+
+#[derive(Clone, Copy)]
+struct HeatmapStyle {
+    visible: bool,
+    opacity: f32,
+    range_min: f32,
+    range_max: f32,
+    colormap_id: f32,
+}
+
+impl Default for HeatmapStyle {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            opacity: 0.4,
+            range_min: 0.05,
+            range_max: 1.0,
+            colormap_id: 0.0,
+        }
+    }
 }
 
 impl Default for OverlayStyle {
@@ -909,8 +1204,9 @@ impl Renderer {
         });
 
         let overlay_style = OverlayStyle::default();
-        let camera_uniform =
-            Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE).as_uniform(overlay_style);
+        let heatmap_style = HeatmapStyle::default();
+        let camera_uniform = Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE)
+            .as_uniform_with_heatmap(overlay_style, heatmap_style);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fovea-camera"),
             contents: bytemuck::bytes_of(&camera_uniform),
@@ -921,7 +1217,7 @@ impl Renderer {
                 label: Some("fovea-camera-layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -992,6 +1288,8 @@ impl Renderer {
         let triangle_pipeline =
             create_triangle_pipeline(&device, &triangle_pipeline_layout, &shader, format);
         let tile_pipeline = create_tile_pipeline(&device, &tile_pipeline_layout, &shader, format);
+        let heatmap_pipeline =
+            create_heatmap_pipeline(&device, &tile_pipeline_layout, &shader, format);
         let point_pipeline =
             create_point_pipeline(&device, &point_pipeline_layout, &shader, format);
         let overlay_point_pipeline =
@@ -1008,6 +1306,7 @@ impl Renderer {
             height,
             triangle_pipeline,
             tile_pipeline,
+            heatmap_pipeline,
             point_pipeline,
             overlay_point_pipeline,
             overlay_line_pipeline,
@@ -1018,15 +1317,21 @@ impl Renderer {
             point_count: 0,
             slide_manifest: None,
             cell_overlay_manifest: None,
+            heatmap_manifest: None,
             texture_cache: TextureCache::new(
                 TILE_CACHE_SOFT_LIMIT_BYTES,
                 TILE_CACHE_HARD_LIMIT_BYTES,
+            ),
+            heatmap_cache: TextureCache::new(
+                HEATMAP_CACHE_SOFT_LIMIT_BYTES,
+                HEATMAP_CACHE_HARD_LIMIT_BYTES,
             ),
             overlay_cache: OverlayCache::new(
                 OVERLAY_CACHE_SOFT_LIMIT_BYTES,
                 OVERLAY_CACHE_HARD_LIMIT_BYTES,
             ),
             overlay_style,
+            heatmap_style,
             hovered_cell: None,
             selected_cell: None,
             frame_index: 0,
@@ -1063,6 +1368,12 @@ impl Renderer {
         self.last_upload_time_ms = 0.0;
     }
 
+    fn set_heatmap_manifest(&mut self, manifest: HeatmapManifest) {
+        self.heatmap_cache.clear();
+        self.heatmap_manifest = Some(manifest);
+        self.last_upload_time_ms = 0.0;
+    }
+
     fn slide_dimensions(&self) -> Option<(f64, f64)> {
         self.slide_manifest
             .as_ref()
@@ -1073,7 +1384,9 @@ impl Renderer {
         self.queue.write_buffer(
             &self.camera_buffer,
             0,
-            bytemuck::bytes_of(&camera.as_uniform(self.overlay_style)),
+            bytemuck::bytes_of(
+                &camera.as_uniform_with_heatmap(self.overlay_style, self.heatmap_style),
+            ),
         );
     }
 
@@ -1246,6 +1559,99 @@ impl Renderer {
         Ok(())
     }
 
+    fn visible_heatmap_tile_requests(
+        &self,
+        camera: &Camera,
+        max_requests: usize,
+    ) -> Option<String> {
+        if !self.heatmap_style.visible {
+            return Some("[]".to_string());
+        }
+
+        let manifest = self.heatmap_manifest.as_ref()?;
+        let best_level = manifest.best_level(camera);
+        let mut requests = Vec::new();
+        let mut seen = HashSet::new();
+
+        for level in manifest.levels.iter().rev() {
+            if level.index < best_level.index {
+                continue;
+            }
+
+            let level_bias = if level.index == best_level.index {
+                1_000_000_000.0
+            } else {
+                f64::from(best_level.index.abs_diff(level.index)) * 10_000.0
+            };
+
+            for visible in manifest.visible_tiles(camera, level) {
+                if self.heatmap_cache.contains(visible.id) || !seen.insert(visible.id) {
+                    continue;
+                }
+
+                if let Some(tile) = manifest.tiles.get(&visible.id) {
+                    requests.push(HeatmapTileRequest {
+                        level: visible.id.level,
+                        x: visible.id.x,
+                        y: visible.id.y,
+                        width: tile.width,
+                        height: tile.height,
+                        path: tile.path.clone(),
+                        byte_size: tile.byte_size,
+                        priority: level_bias + visible.distance,
+                    });
+                }
+            }
+        }
+
+        requests.sort_by(|left, right| {
+            left.priority
+                .partial_cmp(&right.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        requests.truncate(max_requests);
+        serde_json::to_string(&requests).ok()
+    }
+
+    fn upload_heatmap_tile_bytes(
+        &mut self,
+        id: TileId,
+        width: u32,
+        height: u32,
+        bytes: &[u8],
+    ) -> Result<(), JsValue> {
+        let Some(manifest) = &self.heatmap_manifest else {
+            return Ok(());
+        };
+
+        if !manifest.tiles.contains_key(&id) {
+            return Ok(());
+        }
+
+        let expected_len = width as usize * height as usize;
+        if bytes.len() != expected_len {
+            return Err(JsValue::from_str(&format!(
+                "heatmap tile byte length mismatch: got {}, expected {expected_len}",
+                bytes.len()
+            )));
+        }
+
+        let start = Date::now();
+        self.heatmap_cache.insert_r8(
+            &self.device,
+            &self.queue,
+            &self.texture_bind_group_layout,
+            id,
+            width,
+            height,
+            bytes,
+            self.frame_index,
+        );
+        self.last_upload_time_ms = Date::now() - start;
+        self.update_memory_stats(0);
+        Ok(())
+    }
+
     fn set_overlay_visibility(&mut self, visible: bool) {
         self.overlay_style.visible = visible;
         if !visible {
@@ -1264,6 +1670,35 @@ impl Renderer {
 
     fn set_overlay_outline_width(&mut self, width_px: f64) {
         self.overlay_style.outline_width_px = (width_px as f32).clamp(0.25, 6.0);
+    }
+
+    fn set_heatmap_visibility(&mut self, visible: bool) {
+        self.heatmap_style.visible = visible;
+    }
+
+    fn set_heatmap_opacity(&mut self, opacity: f64) {
+        self.heatmap_style.opacity = (opacity as f32).clamp(0.0, 1.0);
+    }
+
+    fn set_heatmap_range(&mut self, min: f64, max: f64) {
+        let min = (min as f32).clamp(0.0, 1.0);
+        let max = (max as f32).clamp(0.0, 1.0);
+
+        if max <= min {
+            self.heatmap_style.range_min = min.min(0.99);
+            self.heatmap_style.range_max = (self.heatmap_style.range_min + 0.01).min(1.0);
+        } else {
+            self.heatmap_style.range_min = min;
+            self.heatmap_style.range_max = max;
+        }
+    }
+
+    fn set_heatmap_colormap(&mut self, colormap: &str) {
+        self.heatmap_style.colormap_id = match colormap {
+            "viridis" => 1.0,
+            "gray" | "grey" => 2.0,
+            _ => 0.0,
+        };
     }
 
     fn hovered_cell_id(&self) -> Option<u64> {
@@ -1346,6 +1781,7 @@ impl Renderer {
         let start = Date::now();
         self.frame_index = self.frame_index.wrapping_add(1);
         let slide_draw = self.prepare_slide_draw(camera);
+        let heatmap_draw = self.prepare_heatmap_draw(camera);
         let overlay_draw = self.prepare_overlay_draw(camera);
         let overlay_highlights = self.prepare_overlay_highlights();
         let tile_vertex_buffer = if slide_draw.vertices.is_empty() {
@@ -1439,7 +1875,10 @@ impl Renderer {
                         pass.draw(command.vertex_start..command.vertex_start + 6, 0..1);
                     }
                 }
-            } else if self.slide_manifest.is_none() && self.cell_overlay_manifest.is_none() {
+            } else if self.slide_manifest.is_none()
+                && self.cell_overlay_manifest.is_none()
+                && self.heatmap_manifest.is_none()
+            {
                 pass.set_pipeline(&self.triangle_pipeline);
                 pass.draw(0..3, 0..1);
 
@@ -1448,6 +1887,26 @@ impl Renderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, point_buffer.slice(..));
                     pass.draw(0..self.point_count, 0..1);
+                }
+            }
+
+            if !heatmap_draw.commands.is_empty() && !heatmap_draw.vertices.is_empty() {
+                let heatmap_vertex_buffer =
+                    self.device
+                        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("fovea-visible-heatmap-vertices"),
+                            contents: bytemuck::cast_slice(&heatmap_draw.vertices),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        });
+                pass.set_pipeline(&self.heatmap_pipeline);
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_vertex_buffer(0, heatmap_vertex_buffer.slice(..));
+
+                for command in &heatmap_draw.commands {
+                    if let Some(entry) = self.heatmap_cache.entry(command.texture_id) {
+                        pass.set_bind_group(1, &entry.bind_group, &[]);
+                        pass.draw(command.vertex_start..command.vertex_start + 6, 0..1);
+                    }
                 }
             }
 
@@ -1490,24 +1949,33 @@ impl Renderer {
             camera,
             self.slide_manifest.as_ref(),
         );
+        self.heatmap_cache
+            .evict(&heatmap_draw.cache_visible_ids, camera, None);
         self.overlay_cache.evict(&overlay_draw.visible_ids);
         self.update_memory_stats(0);
-        let synthetic_draw_calls =
-            if self.slide_manifest.is_none() && self.cell_overlay_manifest.is_none() {
-                2
-            } else {
-                0
-            };
+        let synthetic_draw_calls = if self.slide_manifest.is_none()
+            && self.cell_overlay_manifest.is_none()
+            && self.heatmap_manifest.is_none()
+        {
+            2
+        } else {
+            0
+        };
+        let heatmap_draw_calls = heatmap_draw.commands.len();
         let overlay_draw_calls = overlay_draw.draw_call_count(camera.zoom)
             + usize::from(overlay_highlight_buffer.is_some());
 
         Ok(FrameStats {
             frame_time_ms: Date::now() - start,
             upload_time_ms: self.last_upload_time_ms,
-            draw_call_count: (slide_draw.commands.len() + synthetic_draw_calls + overlay_draw_calls)
-                as u32,
+            draw_call_count: (slide_draw.commands.len()
+                + heatmap_draw_calls
+                + synthetic_draw_calls
+                + overlay_draw_calls) as u32,
             visible_object_count: if overlay_draw.visible_cell_count > 0 {
                 overlay_draw.visible_cell_count
+            } else if heatmap_draw.visible_tile_count > 0 {
+                heatmap_draw.visible_tile_count as u32
             } else if self.slide_manifest.is_some() {
                 slide_draw.visible_tile_count as u32
             } else {
@@ -1538,6 +2006,49 @@ impl Renderer {
 
             cache_visible_ids.insert(sample.texture_id);
             self.texture_cache
+                .touch(sample.texture_id, self.frame_index);
+
+            let vertex_start = vertices.len() as u32;
+            push_tile_vertices(&mut vertices, visible.rect, sample.uv);
+            commands.push(DrawCommand {
+                texture_id: sample.texture_id,
+                vertex_start,
+            });
+        }
+
+        SlideDraw {
+            vertices,
+            commands,
+            cache_visible_ids,
+            visible_tile_count: visible_tiles.len(),
+        }
+    }
+
+    fn prepare_heatmap_draw(&mut self, camera: &Camera) -> SlideDraw {
+        if !self.heatmap_style.visible || self.heatmap_style.opacity <= 0.0 {
+            return SlideDraw::default();
+        }
+
+        let Some(manifest) = &self.heatmap_manifest else {
+            return SlideDraw::default();
+        };
+
+        let best_level = manifest.best_level(camera);
+        let visible_tiles = manifest.visible_tiles(camera, best_level);
+        let mut vertices = Vec::with_capacity(visible_tiles.len() * 6);
+        let mut commands = Vec::new();
+        let mut cache_visible_ids = HashSet::new();
+
+        for visible in &visible_tiles {
+            cache_visible_ids.insert(visible.id);
+
+            let Some(sample) = self.sample_for_visible_heatmap_tile(manifest, best_level, *visible)
+            else {
+                continue;
+            };
+
+            cache_visible_ids.insert(sample.texture_id);
+            self.heatmap_cache
                 .touch(sample.texture_id, self.frame_index);
 
             let vertex_start = vertices.len() as u32;
@@ -1663,6 +2174,54 @@ impl Renderer {
         None
     }
 
+    fn sample_for_visible_heatmap_tile(
+        &self,
+        manifest: &HeatmapManifest,
+        best_level: &LevelManifest,
+        visible: VisibleTile,
+    ) -> Option<TileSample> {
+        if self.heatmap_cache.contains(visible.id) {
+            return Some(TileSample {
+                texture_id: visible.id,
+                uv: UvRect::full(),
+            });
+        }
+
+        for level in manifest
+            .levels
+            .iter()
+            .filter(|level| level.index > best_level.index)
+        {
+            let center = visible.rect.center();
+            let level_x = (center.0 / level.downsample).floor().max(0.0) as u32;
+            let level_y = (center.1 / level.downsample).floor().max(0.0) as u32;
+            let id = TileId {
+                level: level.index,
+                x: (level_x / manifest.tile_size).min(level.tile_cols.saturating_sub(1)),
+                y: (level_y / manifest.tile_size).min(level.tile_rows.saturating_sub(1)),
+            };
+
+            if !self.heatmap_cache.contains(id) {
+                continue;
+            }
+
+            let tile = manifest.tiles.get(&id)?;
+            let parent_rect = manifest.tile_world_rect(level, tile);
+            let uv = UvRect {
+                u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
+                v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
+                u1: ((visible.rect.right() - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0)
+                    as f32,
+                v1: ((visible.rect.bottom() - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0)
+                    as f32,
+            };
+
+            return Some(TileSample { texture_id: id, uv });
+        }
+
+        None
+    }
+
     fn update_memory_stats(&mut self, extra_cpu_bytes: usize) {
         let point_bytes = self
             .point_count
@@ -1670,6 +2229,7 @@ impl Renderer {
             .unwrap_or(u32::MAX);
         let gpu_bytes = std::mem::size_of::<CameraUniform>() as usize
             + self.texture_cache.bytes
+            + self.heatmap_cache.bytes
             + self.overlay_cache.bytes
             + point_bytes as usize;
 
@@ -2295,6 +2855,92 @@ impl TextureCache {
         self.bytes += bytes;
     }
 
+    fn insert_r8(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        id: TileId,
+        width: u32,
+        height: u32,
+        values: &[u8],
+        frame_index: u64,
+    ) {
+        if let Some(old) = self.entries.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+
+        let texture_size = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("fovea-heatmap-tile"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            values,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            texture_size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("fovea-heatmap-tile-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fovea-heatmap-tile-bind-group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let bytes = width as usize * height as usize;
+
+        self.entries.insert(
+            id,
+            TextureEntry {
+                texture,
+                view,
+                sampler,
+                bind_group,
+                width,
+                height,
+                bytes,
+                last_used_frame: frame_index,
+            },
+        );
+        self.bytes += bytes;
+    }
+
     fn evict(
         &mut self,
         visible_ids: &HashSet<TileId>,
@@ -2405,6 +3051,25 @@ fn create_tile_pipeline(
         shader,
         "vs_tile",
         "fs_tile",
+        format,
+        &[TileVertex::layout()],
+        wgpu::PrimitiveTopology::TriangleList,
+    )
+}
+
+fn create_heatmap_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    create_pipeline(
+        device,
+        "fovea-heatmap-pipeline",
+        layout,
+        shader,
+        "vs_tile",
+        "fs_heatmap",
         format,
         &[TileVertex::layout()],
         wgpu::PrimitiveTopology::TriangleList,
@@ -2527,6 +3192,7 @@ struct CameraUniform {
     viewport: [f32; 2],
     _pad1: [f32; 2],
     overlay: [f32; 4],
+    heatmap: [f32; 4],
 }
 
 #[repr(C)]

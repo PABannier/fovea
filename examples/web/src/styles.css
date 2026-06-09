@@ -44,7 +44,7 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   left: 16px;
-  max-width: min(980px, calc(100% - 32px));
+  max-width: min(1180px, calc(100% - 32px));
   padding: 10px;
   top: 16px;
 }
@@ -92,7 +92,7 @@ input[type="range"] {
   accent-color: #00c7db;
   min-height: 22px;
   padding: 0;
-  width: 108px;
+  width: 96px;
 }
 
 select {
