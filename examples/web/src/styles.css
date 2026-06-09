@@ -44,7 +44,7 @@ body {
   flex-wrap: wrap;
   gap: 12px;
   left: 16px;
-  max-width: min(780px, calc(100% - 32px));
+  max-width: min(980px, calc(100% - 32px));
   padding: 10px;
   top: 16px;
 }
@@ -52,7 +52,7 @@ body {
 .bundle-form {
   display: flex;
   gap: 8px;
-  min-width: min(460px, 100%);
+  min-width: min(430px, 100%);
 }
 
 .toolbar label {

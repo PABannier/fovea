@@ -9,8 +9,11 @@ export interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
   pointCount?: BenchmarkPointCount;
   bundleUrl?: string;
+  overlayUrl?: string;
   tileRequestBatchSize?: number;
+  overlayRequestBatchSize?: number;
   maxConcurrentTileRequests?: number;
+  maxConcurrentOverlayRequests?: number;
   onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 }
 
@@ -31,15 +34,29 @@ interface TileRequest {
   priority: number;
 }
 
+interface OverlayChunkRequest {
+  x: number;
+  y: number;
+  path: string;
+  cellCount: number;
+  byteSize: number;
+  priority: number;
+}
+
 export class FoveaViewer {
   private animationFrame = 0;
   private destroyed = false;
   private bundleVersion = 0;
+  private overlayVersion = 0;
   private tileBaseUrl: string | null = null;
+  private overlayBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
   private readonly tileRequestBatchSize: number;
+  private readonly overlayRequestBatchSize: number;
   private readonly maxConcurrentTileRequests: number;
+  private readonly maxConcurrentOverlayRequests: number;
   private readonly inflightTiles = new Map<string, AbortController>();
+  private readonly inflightOverlayChunks = new Map<string, AbortController>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
 
@@ -49,7 +66,9 @@ export class FoveaViewer {
     options: FoveaViewerOptions
   ) {
     this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
+    this.overlayRequestBatchSize = options.overlayRequestBatchSize ?? 64;
     this.maxConcurrentTileRequests = options.maxConcurrentTileRequests ?? 8;
+    this.maxConcurrentOverlayRequests = options.maxConcurrentOverlayRequests ?? 6;
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.bindInput();
@@ -73,6 +92,10 @@ export class FoveaViewer {
       await viewer.loadBundle(options.bundleUrl);
     }
 
+    if (options.overlayUrl) {
+      await viewer.loadOverlay(options.overlayUrl);
+    }
+
     return viewer;
   }
 
@@ -87,6 +110,7 @@ export class FoveaViewer {
       }
 
       this.pumpTileRequests();
+      this.pumpOverlayRequests();
       const stats = this.wasm.render();
       this.observeFrame(stats);
       this.animationFrame = requestAnimationFrame(tick);
@@ -106,6 +130,7 @@ export class FoveaViewer {
     this.destroyed = true;
     this.stop();
     this.abortInflightTiles();
+    this.abortInflightOverlayChunks();
     this.resizeObserver.disconnect();
   }
 
@@ -128,6 +153,28 @@ export class FoveaViewer {
 
     this.tileBaseUrl = new URL(".", manifestUrl).toString();
     this.wasm.loadManifest(manifestJson);
+    this.frameTimes.length = 0;
+  }
+
+  async loadOverlay(overlayUrl: string): Promise<void> {
+    const version = ++this.overlayVersion;
+    this.abortInflightOverlayChunks();
+
+    const manifestUrl = manifestUrlForBundle(overlayUrl);
+    const response = await fetch(manifestUrl, { cache: "no-cache" });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch overlay manifest: ${response.status} ${response.statusText}`);
+    }
+
+    const manifestJson = await response.text();
+
+    if (version !== this.overlayVersion || this.destroyed) {
+      return;
+    }
+
+    this.overlayBaseUrl = new URL(".", manifestUrl).toString();
+    this.wasm.loadOverlayManifest(manifestJson);
     this.frameTimes.length = 0;
   }
 
@@ -250,6 +297,90 @@ export class FoveaViewer {
     }
   }
 
+  private pumpOverlayRequests(): void {
+    if (!this.overlayBaseUrl || this.destroyed) {
+      return;
+    }
+
+    const requests = this.parseVisibleOverlayChunkRequests();
+    const wanted = new Set(requests.map((request) => overlayChunkKey(request)));
+
+    for (const [key, controller] of this.inflightOverlayChunks) {
+      if (!wanted.has(key)) {
+        controller.abort();
+        this.inflightOverlayChunks.delete(key);
+      }
+    }
+
+    for (const request of requests) {
+      if (this.inflightOverlayChunks.size >= this.maxConcurrentOverlayRequests) {
+        break;
+      }
+
+      const key = overlayChunkKey(request);
+
+      if (this.inflightOverlayChunks.has(key)) {
+        continue;
+      }
+
+      const controller = new AbortController();
+      const version = this.overlayVersion;
+      this.inflightOverlayChunks.set(key, controller);
+      void this.loadOverlayChunk(request, controller, version)
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) {
+            console.error(error);
+          }
+        })
+        .finally(() => {
+          if (this.inflightOverlayChunks.get(key) === controller) {
+            this.inflightOverlayChunks.delete(key);
+          }
+        });
+    }
+  }
+
+  private parseVisibleOverlayChunkRequests(): OverlayChunkRequest[] {
+    const raw = this.wasm.visibleOverlayChunkRequests(this.overlayRequestBatchSize);
+
+    try {
+      const requests = JSON.parse(raw) as OverlayChunkRequest[];
+      return requests.sort((a, b) => a.priority - b.priority);
+    } catch {
+      return [];
+    }
+  }
+
+  private async loadOverlayChunk(
+    request: OverlayChunkRequest,
+    controller: AbortController,
+    version: number
+  ): Promise<void> {
+    const overlayBaseUrl = this.overlayBaseUrl;
+
+    if (!overlayBaseUrl) {
+      return;
+    }
+
+    const chunkUrl = new URL(request.path, overlayBaseUrl);
+    const response = await fetch(chunkUrl, {
+      cache: "force-cache",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch overlay chunk ${request.path}: ${response.status}`);
+    }
+
+    const bytes = new Uint8Array(await response.arrayBuffer());
+
+    if (controller.signal.aborted || version !== this.overlayVersion || this.destroyed) {
+      return;
+    }
+
+    this.wasm.uploadOverlayChunkBytes(request.x, request.y, bytes);
+  }
+
   private async loadTile(
     request: TileRequest,
     controller: AbortController,
@@ -331,6 +462,14 @@ export class FoveaViewer {
 
     this.inflightTiles.clear();
   }
+
+  private abortInflightOverlayChunks(): void {
+    for (const controller of this.inflightOverlayChunks.values()) {
+      controller.abort();
+    }
+
+    this.inflightOverlayChunks.clear();
+  }
 }
 
 export type { FrameStats };
@@ -348,6 +487,10 @@ function manifestUrlForBundle(bundleUrl: string): URL {
 
 function tileKey(request: TileRequest): string {
   return `${request.level}/${request.x}/${request.y}`;
+}
+
+function overlayChunkKey(request: OverlayChunkRequest): string {
+  return `${request.x}/${request.y}`;
 }
 
 function decodeBitmapRgba(

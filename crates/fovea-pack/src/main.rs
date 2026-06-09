@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use fovea_pack::{pack_slide, ImageFormat, PackOptions};
+use fovea_pack::{
+    pack_cells_protobuf, pack_slide, CellOverlayPackOptions, ImageFormat, PackOptions,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -19,6 +21,8 @@ struct Cli {
 enum Command {
     /// Convert an OpenSlide-readable WSI into a static Fovea slide bundle.
     Slide(SlideArgs),
+    /// Convert a histotyper SlideSegmentationData protobuf into Fovea overlay chunks.
+    CellsProtobuf(CellsProtobufArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -56,6 +60,33 @@ struct SlideArgs {
     jobs: Option<usize>,
 }
 
+#[derive(Debug, Parser)]
+struct CellsProtobufArgs {
+    /// Input protobuf file containing histotyper.SlideSegmentationData.
+    #[arg(long)]
+    proto: PathBuf,
+
+    /// Output overlay bundle directory.
+    #[arg(long)]
+    out: PathBuf,
+
+    /// Overlay id written into the manifest.
+    #[arg(long, default_value = "cells")]
+    id: String,
+
+    /// Spatial chunk edge length in level-0 slide pixels.
+    #[arg(long, default_value_t = 4096)]
+    chunk_size: u32,
+
+    /// Maximum polygon vertices retained per cell. Use 0 for no cap.
+    #[arg(long, default_value_t = 256)]
+    max_vertices_per_cell: u16,
+
+    /// Remove an existing output bundle before writing.
+    #[arg(long)]
+    force: bool,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum CliImageFormat {
     Webp,
@@ -86,6 +117,14 @@ fn main() -> Result<()> {
             background_threshold: args.background_threshold,
             force: args.force,
             jobs: args.jobs.unwrap_or_else(num_cpus::get).max(1),
+        }),
+        Command::CellsProtobuf(args) => pack_cells_protobuf(CellOverlayPackOptions {
+            proto_path: args.proto,
+            out_dir: args.out,
+            id: args.id,
+            chunk_size: args.chunk_size,
+            max_vertices_per_cell: args.max_vertices_per_cell,
+            force: args.force,
         }),
     }
 }

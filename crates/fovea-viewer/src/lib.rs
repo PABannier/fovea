@@ -14,6 +14,9 @@ const WORLD_SIZE: f64 = 100_000.0;
 const MAX_POINTS: u32 = 1_000_000;
 const TILE_CACHE_SOFT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const TILE_CACHE_HARD_LIMIT_BYTES: usize = 384 * 1024 * 1024;
+const OVERLAY_CACHE_SOFT_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+const OVERLAY_CACHE_HARD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
+const POLYGON_OUTLINE_MIN_ZOOM: f64 = 0.05;
 
 static PANIC_HOOK: Once = Once::new();
 
@@ -109,6 +112,31 @@ impl FoveaViewer {
     ) -> Result<(), JsValue> {
         self.renderer
             .upload_tile_rgba(TileId { level, x, y }, width, height, rgba)
+    }
+
+    #[wasm_bindgen(js_name = loadOverlayManifest)]
+    pub fn load_overlay_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
+        let manifest = CellOverlayManifest::from_json(manifest_json)?;
+        self.renderer.set_cell_overlay_manifest(manifest);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = visibleOverlayChunkRequests)]
+    pub fn visible_overlay_chunk_requests(&self, max_requests: u32) -> String {
+        self.renderer
+            .visible_overlay_chunk_requests(&self.camera, max_requests as usize)
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    #[wasm_bindgen(js_name = uploadOverlayChunkBytes)]
+    pub fn upload_overlay_chunk_bytes(
+        &mut self,
+        x: u32,
+        y: u32,
+        bytes: &[u8],
+    ) -> Result<(), JsValue> {
+        self.renderer
+            .upload_overlay_chunk_bytes(OverlayChunkId { x, y }, bytes)
     }
 
     pub fn render(&mut self) -> Result<FrameStats, JsValue> {
@@ -334,6 +362,157 @@ struct TileRequest {
     priority: f64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct OverlayChunkId {
+    x: u32,
+    y: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawCellOverlayManifest {
+    id: String,
+    width: u32,
+    height: u32,
+    chunk_width: u32,
+    chunk_height: u32,
+    chunks: Vec<CellChunkManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CellChunkManifest {
+    x: u32,
+    y: u32,
+    path: String,
+    cell_count: u32,
+    #[allow(dead_code)]
+    polygon_vertex_count: u32,
+    byte_size: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OverlayChunkRequest {
+    x: u32,
+    y: u32,
+    path: String,
+    cell_count: u32,
+    byte_size: u64,
+    priority: f64,
+}
+
+#[derive(Clone)]
+struct CellOverlayManifest {
+    #[allow(dead_code)]
+    id: String,
+    width: f64,
+    height: f64,
+    chunk_width: u32,
+    chunk_height: u32,
+    chunks: HashMap<OverlayChunkId, CellChunkManifest>,
+}
+
+impl CellOverlayManifest {
+    fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
+        let raw: RawCellOverlayManifest = serde_json::from_str(manifest_json).map_err(|err| {
+            JsValue::from_str(&format!("failed to parse cell overlay manifest: {err}"))
+        })?;
+
+        if raw.chunk_width == 0 || raw.chunk_height == 0 {
+            return Err(JsValue::from_str(
+                "cell overlay chunk dimensions must be nonzero",
+            ));
+        }
+
+        let mut chunks = HashMap::new();
+
+        for chunk in raw.chunks {
+            chunks.insert(
+                OverlayChunkId {
+                    x: chunk.x,
+                    y: chunk.y,
+                },
+                chunk,
+            );
+        }
+
+        Ok(Self {
+            id: raw.id,
+            width: raw.width as f64,
+            height: raw.height as f64,
+            chunk_width: raw.chunk_width,
+            chunk_height: raw.chunk_height,
+            chunks,
+        })
+    }
+
+    fn visible_chunks(&self, camera: &Camera) -> Vec<VisibleOverlayChunk> {
+        let visible = camera.visible_rect();
+
+        if visible.width <= 0.0 || visible.height <= 0.0 {
+            return Vec::new();
+        }
+
+        let min_x = (visible.x / f64::from(self.chunk_width)).floor().max(0.0) as u32;
+        let min_y = (visible.y / f64::from(self.chunk_height)).floor().max(0.0) as u32;
+        let max_x = ((visible.right() - 1.0) / f64::from(self.chunk_width))
+            .floor()
+            .max(0.0) as u32;
+        let max_y = ((visible.bottom() - 1.0) / f64::from(self.chunk_height))
+            .floor()
+            .max(0.0) as u32;
+        let center = visible.center();
+        let mut chunks = Vec::new();
+
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let id = OverlayChunkId { x, y };
+                let Some(chunk) = self.chunks.get(&id) else {
+                    continue;
+                };
+                let rect = self.chunk_world_rect(id);
+                let chunk_center = rect.center();
+                let distance =
+                    (chunk_center.0 - center.0).powi(2) + (chunk_center.1 - center.1).powi(2);
+                chunks.push(VisibleOverlayChunk {
+                    id,
+                    path: chunk.path.clone(),
+                    cell_count: chunk.cell_count,
+                    byte_size: chunk.byte_size,
+                    distance,
+                });
+            }
+        }
+
+        chunks.sort_by(|left, right| {
+            left.distance
+                .partial_cmp(&right.distance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        chunks
+    }
+
+    fn chunk_world_rect(&self, id: OverlayChunkId) -> Rect {
+        Rect {
+            x: f64::from(id.x * self.chunk_width),
+            y: f64::from(id.y * self.chunk_height),
+            width: f64::from(self.chunk_width),
+            height: f64::from(self.chunk_height),
+        }
+        .clamped(self.width, self.height)
+    }
+}
+
+#[derive(Clone)]
+struct VisibleOverlayChunk {
+    id: OverlayChunkId,
+    path: String,
+    cell_count: u32,
+    byte_size: u64,
+    distance: f64,
+}
+
 #[derive(Clone)]
 struct SlideManifest {
     tile_size: u32,
@@ -482,13 +661,17 @@ struct Renderer {
     triangle_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
     point_pipeline: wgpu::RenderPipeline,
+    overlay_point_pipeline: wgpu::RenderPipeline,
+    overlay_line_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     point_buffer: Option<wgpu::Buffer>,
     point_count: u32,
     slide_manifest: Option<SlideManifest>,
+    cell_overlay_manifest: Option<CellOverlayManifest>,
     texture_cache: TextureCache,
+    overlay_cache: OverlayCache,
     frame_index: u64,
     last_upload_time_ms: f64,
     gpu_buffer_memory_bytes: u32,
@@ -630,12 +813,22 @@ impl Renderer {
                 bind_group_layouts: &[Some(&camera_bind_group_layout)],
                 immediate_size: 0,
             });
+        let overlay_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("fovea-overlay-pipeline-layout"),
+                bind_group_layouts: &[Some(&camera_bind_group_layout)],
+                immediate_size: 0,
+            });
 
         let triangle_pipeline =
             create_triangle_pipeline(&device, &triangle_pipeline_layout, &shader, format);
         let tile_pipeline = create_tile_pipeline(&device, &tile_pipeline_layout, &shader, format);
         let point_pipeline =
             create_point_pipeline(&device, &point_pipeline_layout, &shader, format);
+        let overlay_point_pipeline =
+            create_overlay_point_pipeline(&device, &overlay_pipeline_layout, &shader, format);
+        let overlay_line_pipeline =
+            create_overlay_line_pipeline(&device, &overlay_pipeline_layout, &shader, format);
 
         Ok(Self {
             surface,
@@ -647,15 +840,22 @@ impl Renderer {
             triangle_pipeline,
             tile_pipeline,
             point_pipeline,
+            overlay_point_pipeline,
+            overlay_line_pipeline,
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
             point_buffer: None,
             point_count: 0,
             slide_manifest: None,
+            cell_overlay_manifest: None,
             texture_cache: TextureCache::new(
                 TILE_CACHE_SOFT_LIMIT_BYTES,
                 TILE_CACHE_HARD_LIMIT_BYTES,
+            ),
+            overlay_cache: OverlayCache::new(
+                OVERLAY_CACHE_SOFT_LIMIT_BYTES,
+                OVERLAY_CACHE_HARD_LIMIT_BYTES,
             ),
             frame_index: 0,
             last_upload_time_ms: 0.0,
@@ -682,6 +882,12 @@ impl Renderer {
     fn set_slide_manifest(&mut self, manifest: SlideManifest) {
         self.texture_cache.clear();
         self.slide_manifest = Some(manifest);
+        self.last_upload_time_ms = 0.0;
+    }
+
+    fn set_cell_overlay_manifest(&mut self, manifest: CellOverlayManifest) {
+        self.overlay_cache.clear();
+        self.cell_overlay_manifest = Some(manifest);
         self.last_upload_time_ms = 0.0;
     }
 
@@ -816,10 +1022,59 @@ impl Renderer {
         Ok(())
     }
 
+    fn visible_overlay_chunk_requests(
+        &self,
+        camera: &Camera,
+        max_requests: usize,
+    ) -> Option<String> {
+        let manifest = self.cell_overlay_manifest.as_ref()?;
+        let mut requests = Vec::new();
+
+        for visible in manifest.visible_chunks(camera) {
+            if self.overlay_cache.contains(visible.id) {
+                continue;
+            }
+
+            requests.push(OverlayChunkRequest {
+                x: visible.id.x,
+                y: visible.id.y,
+                path: visible.path,
+                cell_count: visible.cell_count,
+                byte_size: visible.byte_size,
+                priority: visible.distance,
+            });
+        }
+
+        requests.truncate(max_requests);
+        serde_json::to_string(&requests).ok()
+    }
+
+    fn upload_overlay_chunk_bytes(
+        &mut self,
+        id: OverlayChunkId,
+        bytes: &[u8],
+    ) -> Result<(), JsValue> {
+        let Some(manifest) = &self.cell_overlay_manifest else {
+            return Ok(());
+        };
+
+        if !manifest.chunks.contains_key(&id) {
+            return Ok(());
+        }
+
+        let start = Date::now();
+        self.overlay_cache
+            .insert_chunk(&self.device, id, bytes, self.frame_index)?;
+        self.last_upload_time_ms = Date::now() - start;
+        self.update_memory_stats(0);
+        Ok(())
+    }
+
     fn render(&mut self, camera: &Camera) -> Result<FrameStats, JsValue> {
         let start = Date::now();
         self.frame_index = self.frame_index.wrapping_add(1);
         let slide_draw = self.prepare_slide_draw(camera);
+        let overlay_draw = self.prepare_overlay_draw(camera);
         let tile_vertex_buffer = if slide_draw.vertices.is_empty() {
             None
         } else {
@@ -899,7 +1154,7 @@ impl Renderer {
                         pass.draw(command.vertex_start..command.vertex_start + 6, 0..1);
                     }
                 }
-            } else if self.slide_manifest.is_none() {
+            } else if self.slide_manifest.is_none() && self.cell_overlay_manifest.is_none() {
                 pass.set_pipeline(&self.triangle_pipeline);
                 pass.draw(0..3, 0..1);
 
@@ -908,6 +1163,32 @@ impl Renderer {
                     pass.set_bind_group(0, &self.camera_bind_group, &[]);
                     pass.set_vertex_buffer(0, point_buffer.slice(..));
                     pass.draw(0..self.point_count, 0..1);
+                }
+            }
+
+            if !overlay_draw.commands.is_empty() {
+                pass.set_bind_group(0, &self.camera_bind_group, &[]);
+
+                if camera.zoom >= POLYGON_OUTLINE_MIN_ZOOM {
+                    pass.set_pipeline(&self.overlay_line_pipeline);
+                    for command in &overlay_draw.commands {
+                        if let Some(entry) = self.overlay_cache.entry(command.id) {
+                            if entry.line_vertex_count == 0 {
+                                continue;
+                            }
+
+                            pass.set_vertex_buffer(0, entry.line_buffer.slice(..));
+                            pass.draw(0..entry.line_vertex_count, 0..1);
+                        }
+                    }
+                }
+
+                pass.set_pipeline(&self.overlay_point_pipeline);
+                for command in &overlay_draw.commands {
+                    if let Some(entry) = self.overlay_cache.entry(command.id) {
+                        pass.set_vertex_buffer(0, entry.point_buffer.slice(..));
+                        pass.draw(0..6, 0..entry.point_count);
+                    }
                 }
             }
         }
@@ -919,17 +1200,24 @@ impl Renderer {
             camera,
             self.slide_manifest.as_ref(),
         );
+        self.overlay_cache.evict(&overlay_draw.visible_ids);
         self.update_memory_stats(0);
+        let synthetic_draw_calls =
+            if self.slide_manifest.is_none() && self.cell_overlay_manifest.is_none() {
+                2
+            } else {
+                0
+            };
+        let overlay_draw_calls = overlay_draw.draw_call_count(camera.zoom);
 
         Ok(FrameStats {
             frame_time_ms: Date::now() - start,
             upload_time_ms: self.last_upload_time_ms,
-            draw_call_count: slide_draw
-                .commands
-                .len()
-                .max(if self.slide_manifest.is_some() { 0 } else { 2 })
+            draw_call_count: (slide_draw.commands.len() + synthetic_draw_calls + overlay_draw_calls)
                 as u32,
-            visible_object_count: if self.slide_manifest.is_some() {
+            visible_object_count: if overlay_draw.visible_cell_count > 0 {
+                overlay_draw.visible_cell_count
+            } else if self.slide_manifest.is_some() {
                 slide_draw.visible_tile_count as u32
             } else {
                 self.point_count
@@ -974,6 +1262,33 @@ impl Renderer {
             commands,
             cache_visible_ids,
             visible_tile_count: visible_tiles.len(),
+        }
+    }
+
+    fn prepare_overlay_draw(&mut self, camera: &Camera) -> OverlayDraw {
+        let Some(manifest) = &self.cell_overlay_manifest else {
+            return OverlayDraw::default();
+        };
+
+        let visible_chunks = manifest.visible_chunks(camera);
+        let mut commands = Vec::new();
+        let mut visible_ids = HashSet::new();
+        let mut visible_cell_count = 0_u32;
+
+        for visible in visible_chunks {
+            visible_ids.insert(visible.id);
+
+            if self.overlay_cache.contains(visible.id) {
+                self.overlay_cache.touch(visible.id, self.frame_index);
+                commands.push(OverlayDrawCommand { id: visible.id });
+                visible_cell_count = visible_cell_count.saturating_add(visible.cell_count);
+            }
+        }
+
+        OverlayDraw {
+            commands,
+            visible_ids,
+            visible_cell_count,
         }
     }
 
@@ -1032,6 +1347,7 @@ impl Renderer {
             .unwrap_or(u32::MAX);
         let gpu_bytes = std::mem::size_of::<CameraUniform>() as usize
             + self.texture_cache.bytes
+            + self.overlay_cache.bytes
             + point_bytes as usize;
 
         self.gpu_buffer_memory_bytes = gpu_bytes.min(u32::MAX as usize) as u32;
@@ -1045,6 +1361,27 @@ struct SlideDraw {
     commands: Vec<DrawCommand>,
     cache_visible_ids: HashSet<TileId>,
     visible_tile_count: usize,
+}
+
+#[derive(Default)]
+struct OverlayDraw {
+    commands: Vec<OverlayDrawCommand>,
+    visible_ids: HashSet<OverlayChunkId>,
+    visible_cell_count: u32,
+}
+
+impl OverlayDraw {
+    fn draw_call_count(&self, zoom: f64) -> usize {
+        if zoom >= POLYGON_OUTLINE_MIN_ZOOM {
+            self.commands.len() * 2
+        } else {
+            self.commands.len()
+        }
+    }
+}
+
+struct OverlayDrawCommand {
+    id: OverlayChunkId,
 }
 
 struct DrawCommand {
@@ -1090,6 +1427,272 @@ fn push_tile_vertices(vertices: &mut Vec<TileVertex>, rect: Rect, uv: UvRect) {
         TileVertex::new(x1, y1, uv.u1, uv.v1),
         TileVertex::new(x0, y1, uv.u0, uv.v1),
     ]);
+}
+
+struct OverlayCache {
+    soft_limit_bytes: usize,
+    hard_limit_bytes: usize,
+    entries: HashMap<OverlayChunkId, OverlayEntry>,
+    bytes: usize,
+}
+
+impl OverlayCache {
+    fn new(soft_limit_bytes: usize, hard_limit_bytes: usize) -> Self {
+        Self {
+            soft_limit_bytes,
+            hard_limit_bytes,
+            entries: HashMap::new(),
+            bytes: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.bytes = 0;
+    }
+
+    fn contains(&self, id: OverlayChunkId) -> bool {
+        self.entries.contains_key(&id)
+    }
+
+    fn entry(&self, id: OverlayChunkId) -> Option<&OverlayEntry> {
+        self.entries.get(&id)
+    }
+
+    fn touch(&mut self, id: OverlayChunkId, frame_index: u64) {
+        if let Some(entry) = self.entries.get_mut(&id) {
+            entry.last_used_frame = frame_index;
+        }
+    }
+
+    fn insert_chunk(
+        &mut self,
+        device: &wgpu::Device,
+        id: OverlayChunkId,
+        bytes: &[u8],
+        frame_index: u64,
+    ) -> Result<(), JsValue> {
+        if let Some(old) = self.entries.remove(&id) {
+            self.bytes = self.bytes.saturating_sub(old.bytes);
+        }
+
+        let decoded = decode_overlay_chunk(id, bytes)?;
+        let point_bytes = bytemuck::cast_slice(&decoded.points);
+        let line_bytes = bytemuck::cast_slice(&decoded.lines);
+        let point_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fovea-overlay-points"),
+            contents: point_bytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let line_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fovea-overlay-lines"),
+            contents: line_bytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let entry_bytes = point_bytes.len() + line_bytes.len();
+
+        self.entries.insert(
+            id,
+            OverlayEntry {
+                point_buffer,
+                line_buffer,
+                point_count: decoded.points.len() as u32,
+                line_vertex_count: decoded.lines.len() as u32,
+                bytes: entry_bytes,
+                last_used_frame: frame_index,
+            },
+        );
+        self.bytes += entry_bytes;
+        Ok(())
+    }
+
+    fn evict(&mut self, visible_ids: &HashSet<OverlayChunkId>) {
+        if self.bytes <= self.hard_limit_bytes && self.bytes <= self.soft_limit_bytes {
+            return;
+        }
+
+        let mut candidates: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(id, _)| !visible_ids.contains(id))
+            .map(|(id, entry)| (*id, entry.last_used_frame))
+            .collect();
+        candidates.sort_by_key(|(_, last_used_frame)| *last_used_frame);
+
+        let target = self.soft_limit_bytes.min(self.hard_limit_bytes);
+        for (id, _) in candidates {
+            if self.bytes <= target {
+                break;
+            }
+
+            if let Some(entry) = self.entries.remove(&id) {
+                self.bytes = self.bytes.saturating_sub(entry.bytes);
+            }
+        }
+    }
+}
+
+struct OverlayEntry {
+    point_buffer: wgpu::Buffer,
+    line_buffer: wgpu::Buffer,
+    point_count: u32,
+    line_vertex_count: u32,
+    bytes: usize,
+    last_used_frame: u64,
+}
+
+struct DecodedOverlayChunk {
+    points: Vec<OverlayPointVertex>,
+    lines: Vec<OverlayLineVertex>,
+}
+
+#[derive(Clone, Copy)]
+struct OverlayCellHeader {
+    class_id: u32,
+    vertex_count: u16,
+    vertex_offset: u32,
+}
+
+fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverlayChunk, JsValue> {
+    let mut reader = ByteReader::new(bytes);
+    let magic = reader.read_bytes(4)?;
+
+    if magic != b"FOVC" {
+        return Err(JsValue::from_str("overlay chunk has invalid magic"));
+    }
+
+    let version = reader.read_u32()?;
+    if version != 1 {
+        return Err(JsValue::from_str("unsupported overlay chunk version"));
+    }
+
+    let chunk_x = reader.read_u32()?;
+    let chunk_y = reader.read_u32()?;
+
+    if chunk_x != id.x || chunk_y != id.y {
+        return Err(JsValue::from_str(
+            "overlay chunk coordinates do not match request",
+        ));
+    }
+
+    let origin_x = reader.read_f32()?;
+    let origin_y = reader.read_f32()?;
+    let chunk_width = reader.read_f32()?;
+    let chunk_height = reader.read_f32()?;
+    let cell_count = reader.read_u32()? as usize;
+    let polygon_vertex_count = reader.read_u32()? as usize;
+    let mut points = Vec::with_capacity(cell_count);
+    let mut headers = Vec::with_capacity(cell_count);
+
+    for _ in 0..cell_count {
+        let _cell_id = reader.read_u64()?;
+        let class_id = u32::from(reader.read_u16()?);
+        let vertex_count = reader.read_u16()?;
+        let _confidence = reader.read_f32()?;
+        let centroid_x = reader.read_u16()?;
+        let centroid_y = reader.read_u16()?;
+        let vertex_offset = reader.read_u32()?;
+        let _bbox_min_x = reader.read_u16()?;
+        let _bbox_min_y = reader.read_u16()?;
+        let _bbox_max_x = reader.read_u16()?;
+        let _bbox_max_y = reader.read_u16()?;
+        points.push(OverlayPointVertex {
+            position: [
+                dequantize(centroid_x, origin_x, chunk_width),
+                dequantize(centroid_y, origin_y, chunk_height),
+            ],
+            class_id,
+            _pad: 0,
+        });
+        headers.push(OverlayCellHeader {
+            class_id,
+            vertex_count,
+            vertex_offset,
+        });
+    }
+
+    let mut polygon_points = Vec::with_capacity(polygon_vertex_count);
+    for _ in 0..polygon_vertex_count {
+        let x = reader.read_u16()?;
+        let y = reader.read_u16()?;
+        polygon_points.push([
+            dequantize(x, origin_x, chunk_width),
+            dequantize(y, origin_y, chunk_height),
+        ]);
+    }
+
+    let mut lines = Vec::new();
+    for header in headers {
+        let start = header.vertex_offset as usize;
+        let len = usize::from(header.vertex_count);
+
+        if len < 2 || start + len > polygon_points.len() {
+            continue;
+        }
+
+        for index in 0..len {
+            let a = polygon_points[start + index];
+            let b = polygon_points[start + ((index + 1) % len)];
+            lines.push(OverlayLineVertex {
+                position: a,
+                class_id: header.class_id,
+                _pad: 0,
+            });
+            lines.push(OverlayLineVertex {
+                position: b,
+                class_id: header.class_id,
+                _pad: 0,
+            });
+        }
+    }
+
+    Ok(DecodedOverlayChunk { points, lines })
+}
+
+fn dequantize(value: u16, origin: f32, size: f32) -> f32 {
+    origin + (f32::from(value) / f32::from(u16::MAX)) * size
+}
+
+struct ByteReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], JsValue> {
+        if self.offset + len > self.bytes.len() {
+            return Err(JsValue::from_str("overlay chunk ended unexpectedly"));
+        }
+
+        let start = self.offset;
+        self.offset += len;
+        Ok(&self.bytes[start..self.offset])
+    }
+
+    fn read_u16(&mut self) -> Result<u16, JsValue> {
+        let bytes = self.read_bytes(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, JsValue> {
+        let bytes = self.read_bytes(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_u64(&mut self) -> Result<u64, JsValue> {
+        let bytes = self.read_bytes(8)?;
+        Ok(u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn read_f32(&mut self) -> Result<f32, JsValue> {
+        Ok(f32::from_bits(self.read_u32()?))
+    }
 }
 
 struct TextureCache {
@@ -1349,6 +1952,44 @@ fn create_point_pipeline(
     )
 }
 
+fn create_overlay_point_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    create_pipeline(
+        device,
+        "fovea-overlay-point-pipeline",
+        layout,
+        shader,
+        "vs_overlay_point",
+        "fs_point",
+        format,
+        &[OverlayPointVertex::layout()],
+        wgpu::PrimitiveTopology::TriangleList,
+    )
+}
+
+fn create_overlay_line_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    create_pipeline(
+        device,
+        "fovea-overlay-line-pipeline",
+        layout,
+        shader,
+        "vs_overlay_line",
+        "fs_point",
+        format,
+        &[OverlayLineVertex::layout()],
+        wgpu::PrimitiveTopology::LineList,
+    )
+}
+
 fn create_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -1461,5 +2102,52 @@ impl PointVertex {
                 shader_location: 0,
             }],
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct OverlayPointVertex {
+    position: [f32; 2],
+    class_id: u32,
+    _pad: u32,
+}
+
+impl OverlayPointVertex {
+    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        overlay_vertex_layout::<OverlayPointVertex>(wgpu::VertexStepMode::Instance)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct OverlayLineVertex {
+    position: [f32; 2],
+    class_id: u32,
+    _pad: u32,
+}
+
+impl OverlayLineVertex {
+    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
+        overlay_vertex_layout::<OverlayLineVertex>(wgpu::VertexStepMode::Vertex)
+    }
+}
+
+fn overlay_vertex_layout<'a, T>(step_mode: wgpu::VertexStepMode) -> wgpu::VertexBufferLayout<'a> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<T>() as wgpu::BufferAddress,
+        step_mode,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                shader_location: 1,
+            },
+        ],
     }
 }

@@ -1,23 +1,35 @@
-import { FoveaViewer, type BenchmarkPointCount } from "@fovea/js";
+import { FoveaViewer } from "@fovea/js";
 import "./styles.css";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
-const pointSelect = document.querySelector<HTMLSelectElement>("#point-count");
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-camera");
 const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
 const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
+const overlayForm = document.querySelector<HTMLFormElement>("#overlay-form");
+const overlayInput = document.querySelector<HTMLInputElement>("#overlay-url");
 const loadStatus = document.querySelector<HTMLElement>("#load-status");
 
-if (!canvas || !pointSelect || !resetButton || !bundleForm || !bundleInput || !loadStatus) {
+if (
+  !canvas ||
+  !resetButton ||
+  !bundleForm ||
+  !bundleInput ||
+  !overlayForm ||
+  !overlayInput ||
+  !loadStatus
+) {
   throw new Error("Fovea example DOM is incomplete");
 }
 
 const viewerCanvas = canvas;
-const pointCountSelect = pointSelect;
 const resetCameraButton = resetButton;
 const bundleUrlForm = bundleForm;
 const bundleUrlInput = bundleInput;
+const overlayUrlForm = overlayForm;
+const overlayUrlInput = overlayInput;
 const bundleLoadStatus = loadStatus;
+let slideLoaded = false;
+let overlayLoaded = false;
 
 const values = {
   fps: document.querySelector<HTMLElement>("#fps"),
@@ -50,14 +62,18 @@ function formatBytes(value: number): string {
 
 async function main(): Promise<void> {
   const bundleParam = new URLSearchParams(window.location.search).get("bundle");
+  const overlayParam = new URLSearchParams(window.location.search).get("overlay");
 
   if (bundleParam) {
     bundleUrlInput.value = bundleParam;
   }
 
+  if (overlayParam) {
+    overlayUrlInput.value = overlayParam;
+  }
+
   const viewer = await FoveaViewer.create({
     canvas: viewerCanvas,
-    pointCount: Number(pointCountSelect.value) as BenchmarkPointCount,
     onStats: (stats, rolling) => {
       setText("fps", rolling.fps.toFixed(1));
       setText("p50", formatMs(rolling.frameTimeP50));
@@ -72,10 +88,6 @@ async function main(): Promise<void> {
     }
   });
 
-  pointCountSelect.addEventListener("change", () => {
-    viewer.setPointCount(Number(pointCountSelect.value) as BenchmarkPointCount);
-  });
-
   resetCameraButton.addEventListener("click", () => viewer.resetCamera());
 
   bundleUrlForm.addEventListener("submit", (event) => {
@@ -83,8 +95,17 @@ async function main(): Promise<void> {
     void loadBundleFromInput(viewer);
   });
 
+  overlayUrlForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void loadOverlayFromInput(viewer);
+  });
+
   if (bundleUrlInput.value.trim()) {
     await loadBundleFromInput(viewer);
+  }
+
+  if (overlayUrlInput.value.trim()) {
+    await loadOverlayFromInput(viewer);
   }
 
   viewer.start();
@@ -101,10 +122,44 @@ async function loadBundleFromInput(viewer: FoveaViewer): Promise<void> {
 
   try {
     await viewer.loadBundle(bundleUrl);
-    bundleLoadStatus.textContent = "Slide";
+    slideLoaded = true;
+    updateLoadStatus();
   } catch (error) {
+    slideLoaded = false;
     bundleLoadStatus.textContent = "Load failed";
     throw error;
+  }
+}
+
+async function loadOverlayFromInput(viewer: FoveaViewer): Promise<void> {
+  const overlayUrl = overlayUrlInput.value.trim();
+
+  if (!overlayUrl) {
+    return;
+  }
+
+  bundleLoadStatus.textContent = "Overlay";
+
+  try {
+    await viewer.loadOverlay(overlayUrl);
+    overlayLoaded = true;
+    updateLoadStatus();
+  } catch (error) {
+    overlayLoaded = false;
+    bundleLoadStatus.textContent = "Overlay failed";
+    throw error;
+  }
+}
+
+function updateLoadStatus(): void {
+  if (slideLoaded && overlayLoaded) {
+    bundleLoadStatus.textContent = "Slide + cells";
+  } else if (slideLoaded) {
+    bundleLoadStatus.textContent = "Slide";
+  } else if (overlayLoaded) {
+    bundleLoadStatus.textContent = "Cells";
+  } else {
+    bundleLoadStatus.textContent = "Synthetic";
   }
 }
 
