@@ -8,6 +8,9 @@ export type BenchmarkPointCount = 10_000 | 100_000 | 500_000 | 1_000_000;
 export interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
   pointCount?: BenchmarkPointCount;
+  bundleUrl?: string;
+  tileRequestBatchSize?: number;
+  maxConcurrentTileRequests?: number;
   onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 }
 
@@ -18,32 +21,56 @@ export interface RollingFrameStats {
   fps: number;
 }
 
+interface TileRequest {
+  level: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  path: string;
+  priority: number;
+}
+
 export class FoveaViewer {
   private animationFrame = 0;
   private destroyed = false;
+  private bundleVersion = 0;
+  private tileBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
+  private readonly tileRequestBatchSize: number;
+  private readonly maxConcurrentTileRequests: number;
+  private readonly inflightTiles = new Map<string, AbortController>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
 
   private constructor(
     private readonly wasm: WasmFoveaViewer,
     private readonly canvas: HTMLCanvasElement,
-    private readonly onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void
+    options: FoveaViewerOptions
   ) {
+    this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
+    this.maxConcurrentTileRequests = options.maxConcurrentTileRequests ?? 8;
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.bindInput();
     this.resize();
+    this.onStats = options.onStats;
   }
+
+  private readonly onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 
   static async create(options: FoveaViewerOptions): Promise<FoveaViewer> {
     await initWasm();
 
     const wasm = await WasmFoveaViewer.create(options.canvas);
-    const viewer = new FoveaViewer(wasm, options.canvas, options.onStats);
+    const viewer = new FoveaViewer(wasm, options.canvas, options);
 
     if (options.pointCount) {
       viewer.setPointCount(options.pointCount);
+    }
+
+    if (options.bundleUrl) {
+      await viewer.loadBundle(options.bundleUrl);
     }
 
     return viewer;
@@ -59,6 +86,7 @@ export class FoveaViewer {
         return;
       }
 
+      this.pumpTileRequests();
       const stats = this.wasm.render();
       this.observeFrame(stats);
       this.animationFrame = requestAnimationFrame(tick);
@@ -77,7 +105,30 @@ export class FoveaViewer {
   destroy(): void {
     this.destroyed = true;
     this.stop();
+    this.abortInflightTiles();
     this.resizeObserver.disconnect();
+  }
+
+  async loadBundle(bundleUrl: string): Promise<void> {
+    const version = ++this.bundleVersion;
+    this.abortInflightTiles();
+
+    const manifestUrl = manifestUrlForBundle(bundleUrl);
+    const response = await fetch(manifestUrl, { cache: "no-cache" });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch manifest: ${response.status} ${response.statusText}`);
+    }
+
+    const manifestJson = await response.text();
+
+    if (version !== this.bundleVersion || this.destroyed) {
+      return;
+    }
+
+    this.tileBaseUrl = new URL(".", manifestUrl).toString();
+    this.wasm.loadManifest(manifestJson);
+    this.frameTimes.length = 0;
   }
 
   setPointCount(count: BenchmarkPointCount): void {
@@ -145,6 +196,109 @@ export class FoveaViewer {
     );
   }
 
+  private pumpTileRequests(): void {
+    if (!this.tileBaseUrl || this.destroyed) {
+      return;
+    }
+
+    const requests = this.parseVisibleTileRequests();
+    const wanted = new Set(requests.map((request) => tileKey(request)));
+
+    for (const [key, controller] of this.inflightTiles) {
+      if (!wanted.has(key)) {
+        controller.abort();
+        this.inflightTiles.delete(key);
+      }
+    }
+
+    for (const request of requests) {
+      if (this.inflightTiles.size >= this.maxConcurrentTileRequests) {
+        break;
+      }
+
+      const key = tileKey(request);
+
+      if (this.inflightTiles.has(key)) {
+        continue;
+      }
+
+      const controller = new AbortController();
+      const version = this.bundleVersion;
+      this.inflightTiles.set(key, controller);
+      void this.loadTile(request, controller, version)
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) {
+            console.error(error);
+          }
+        })
+        .finally(() => {
+          if (this.inflightTiles.get(key) === controller) {
+            this.inflightTiles.delete(key);
+          }
+        });
+    }
+  }
+
+  private parseVisibleTileRequests(): TileRequest[] {
+    const raw = this.wasm.visibleTileRequests(this.tileRequestBatchSize);
+
+    try {
+      const requests = JSON.parse(raw) as TileRequest[];
+      return requests.sort((a, b) => a.priority - b.priority);
+    } catch {
+      return [];
+    }
+  }
+
+  private async loadTile(
+    request: TileRequest,
+    controller: AbortController,
+    version: number
+  ): Promise<void> {
+    const tileBaseUrl = this.tileBaseUrl;
+
+    if (!tileBaseUrl) {
+      return;
+    }
+
+    const tileUrl = new URL(request.path, tileBaseUrl);
+    const response = await fetch(tileUrl, {
+      cache: "force-cache",
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch tile ${request.path}: ${response.status}`);
+    }
+
+    const blob = await response.blob();
+
+    if (controller.signal.aborted || version !== this.bundleVersion || this.destroyed) {
+      return;
+    }
+
+    const bitmap = await createImageBitmap(blob);
+
+    try {
+      const rgba = decodeBitmapRgba(bitmap, request.width, request.height);
+
+      if (controller.signal.aborted || version !== this.bundleVersion || this.destroyed) {
+        return;
+      }
+
+      this.wasm.uploadTileRgba(
+        request.level,
+        request.x,
+        request.y,
+        rgba.width,
+        rgba.height,
+        rgba.data
+      );
+    } finally {
+      bitmap.close();
+    }
+  }
+
   private observeFrame(stats: FrameStats): void {
     this.frameTimes.push(stats.frameTimeMs);
 
@@ -169,7 +323,65 @@ export class FoveaViewer {
 
     this.onStats(stats, rolling);
   }
+
+  private abortInflightTiles(): void {
+    for (const controller of this.inflightTiles.values()) {
+      controller.abort();
+    }
+
+    this.inflightTiles.clear();
+  }
 }
 
 export type { FrameStats };
 
+function manifestUrlForBundle(bundleUrl: string): URL {
+  const url = new URL(bundleUrl, window.location.href);
+
+  if (url.pathname.endsWith(".json")) {
+    return url;
+  }
+
+  const pathname = url.pathname.endsWith("/") ? url.pathname : `${url.pathname}/`;
+  return new URL(`${pathname}manifest.json${url.search}`, url);
+}
+
+function tileKey(request: TileRequest): string {
+  return `${request.level}/${request.x}/${request.y}`;
+}
+
+function decodeBitmapRgba(
+  bitmap: ImageBitmap,
+  expectedWidth: number,
+  expectedHeight: number
+): { data: Uint8Array; width: number; height: number } {
+  const width = bitmap.width || expectedWidth;
+  const height = bitmap.height || expectedHeight;
+  const canvas =
+    typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(width, height)
+      : document.createElement("canvas");
+
+  canvas.width = width;
+  canvas.height = height;
+
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+
+  if (!context) {
+    throw new Error("2D canvas context unavailable for tile decode");
+  }
+
+  context.clearRect(0, 0, width, height);
+  context.drawImage(bitmap, 0, 0, width, height);
+
+  const imageData = context.getImageData(0, 0, width, height);
+  return {
+    data: new Uint8Array(
+      imageData.data.buffer,
+      imageData.data.byteOffset,
+      imageData.data.byteLength
+    ),
+    width,
+    height
+  };
+}

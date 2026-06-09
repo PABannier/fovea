@@ -41,10 +41,18 @@ body {
 .toolbar {
   align-items: center;
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
   left: 16px;
+  max-width: min(780px, calc(100% - 32px));
   padding: 10px;
   top: 16px;
+}
+
+.bundle-form {
+  display: flex;
+  gap: 8px;
+  min-width: min(460px, 100%);
 }
 
 .toolbar label {
@@ -58,6 +66,7 @@ body {
 }
 
 select,
+input,
 button {
   background: #242a30;
   border: 1px solid rgb(255 255 255 / 12%);
@@ -65,6 +74,12 @@ button {
   color: #f7f8fa;
   font: inherit;
   min-height: 34px;
+}
+
+input {
+  min-width: 0;
+  padding: 0 10px;
+  width: 100%;
 }
 
 select {
@@ -77,8 +92,18 @@ button {
 }
 
 button:hover,
+input:hover,
 select:hover {
   background: #2d343b;
+}
+
+.load-status {
+  color: #aab2bd;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  min-width: 72px;
+  text-transform: uppercase;
 }
 
 .stats {
@@ -116,6 +141,10 @@ select:hover {
     top: 10px;
   }
 
+  .bundle-form {
+    flex-basis: 100%;
+  }
+
   .stats {
     bottom: 10px;
     grid-template-columns: 1fr;
@@ -123,4 +152,3 @@ select:hover {
     right: 10px;
   }
 }
-

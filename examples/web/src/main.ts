@@ -4,14 +4,20 @@ import "./styles.css";
 const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
 const pointSelect = document.querySelector<HTMLSelectElement>("#point-count");
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-camera");
+const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
+const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
+const loadStatus = document.querySelector<HTMLElement>("#load-status");
 
-if (!canvas || !pointSelect || !resetButton) {
+if (!canvas || !pointSelect || !resetButton || !bundleForm || !bundleInput || !loadStatus) {
   throw new Error("Fovea example DOM is incomplete");
 }
 
 const viewerCanvas = canvas;
 const pointCountSelect = pointSelect;
 const resetCameraButton = resetButton;
+const bundleUrlForm = bundleForm;
+const bundleUrlInput = bundleInput;
+const bundleLoadStatus = loadStatus;
 
 const values = {
   fps: document.querySelector<HTMLElement>("#fps"),
@@ -43,6 +49,12 @@ function formatBytes(value: number): string {
 }
 
 async function main(): Promise<void> {
+  const bundleParam = new URLSearchParams(window.location.search).get("bundle");
+
+  if (bundleParam) {
+    bundleUrlInput.value = bundleParam;
+  }
+
   const viewer = await FoveaViewer.create({
     canvas: viewerCanvas,
     pointCount: Number(pointCountSelect.value) as BenchmarkPointCount,
@@ -66,7 +78,34 @@ async function main(): Promise<void> {
 
   resetCameraButton.addEventListener("click", () => viewer.resetCamera());
 
+  bundleUrlForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void loadBundleFromInput(viewer);
+  });
+
+  if (bundleUrlInput.value.trim()) {
+    await loadBundleFromInput(viewer);
+  }
+
   viewer.start();
+}
+
+async function loadBundleFromInput(viewer: FoveaViewer): Promise<void> {
+  const bundleUrl = bundleUrlInput.value.trim();
+
+  if (!bundleUrl) {
+    return;
+  }
+
+  bundleLoadStatus.textContent = "Loading";
+
+  try {
+    await viewer.loadBundle(bundleUrl);
+    bundleLoadStatus.textContent = "Slide";
+  } catch (error) {
+    bundleLoadStatus.textContent = "Load failed";
+    throw error;
+  }
 }
 
 void main();

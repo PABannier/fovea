@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 
 const root = resolve(dirname(new URL(import.meta.url).pathname), "..");
 const wasmTarget = "wasm32-unknown-unknown";
-const wasmBindgenVersion = "0.2.104";
+const wasmBindgenVersion = "0.2.108";
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -29,6 +29,20 @@ function commandExists(command) {
   return result.status === 0;
 }
 
+function commandVersion(command) {
+  const result = spawnSync(command, ["--version"], {
+    cwd: root,
+    encoding: "utf8",
+    shell: process.platform === "win32"
+  });
+
+  if (result.status !== 0) {
+    return "";
+  }
+
+  return result.stdout.trim();
+}
+
 const installedTargets = spawnSync("rustup", ["target", "list", "--installed"], {
   cwd: root,
   encoding: "utf8",
@@ -39,8 +53,18 @@ if (!installedTargets.stdout?.includes(wasmTarget)) {
   run("rustup", ["target", "add", wasmTarget]);
 }
 
-if (!commandExists("wasm-bindgen")) {
-  run("cargo", ["install", "wasm-bindgen-cli", "--version", wasmBindgenVersion, "--locked"]);
+if (
+  !commandExists("wasm-bindgen") ||
+  !commandVersion("wasm-bindgen").includes(wasmBindgenVersion)
+) {
+  run("cargo", [
+    "install",
+    "wasm-bindgen-cli",
+    "--version",
+    wasmBindgenVersion,
+    "--locked",
+    "--force"
+  ]);
 }
 
 const outDir = resolve(root, "packages/fovea-js/pkg");
@@ -71,4 +95,3 @@ run("wasm-bindgen", [
   "fovea_viewer",
   wasmPath
 ]);
-

@@ -3,12 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Fovea Phase 0</title>
+    <title>Fovea</title>
   </head>
   <body>
     <main id="app">
       <canvas id="viewer"></canvas>
       <section class="toolbar" aria-label="Benchmark controls">
+        <form id="bundle-form" class="bundle-form">
+          <input
+            id="bundle-url"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="/@fs/.../tcga-aa.fovea"
+          />
+          <button id="load-bundle" type="submit">Load</button>
+        </form>
         <label>
           Points
           <select id="point-count">
@@ -19,6 +29,7 @@
           </select>
         </label>
         <button id="reset-camera" type="button">Reset</button>
+        <span id="load-status" class="load-status">Synthetic</span>
       </section>
       <section class="stats" aria-live="polite">
         <div><span>FPS</span><strong id="fps">0</strong></div>
@@ -36,4 +47,3 @@
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
-

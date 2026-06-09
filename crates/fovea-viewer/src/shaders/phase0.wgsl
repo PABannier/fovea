@@ -48,34 +48,21 @@ fn fs_triangle(input: VertexOut) -> @location(0) vec4<f32> {
 }
 
 @vertex
-fn vs_quad(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  var positions = array<vec2<f32>, 6>(
-    vec2<f32>(0.58, -0.82),
-    vec2<f32>(0.94, -0.82),
-    vec2<f32>(0.94, -0.46),
-    vec2<f32>(0.58, -0.82),
-    vec2<f32>(0.94, -0.46),
-    vec2<f32>(0.58, -0.46)
+fn vs_tile(@location(0) world_position: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOut {
+  let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
+  let ndc = vec2<f32>(
+    (screen.x / camera.viewport.x) * 2.0 - 1.0,
+    1.0 - (screen.y / camera.viewport.y) * 2.0
   );
-
-  var uvs = array<vec2<f32>, 6>(
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 1.0),
-    vec2<f32>(1.0, 0.0),
-    vec2<f32>(0.0, 1.0),
-    vec2<f32>(1.0, 0.0),
-    vec2<f32>(0.0, 0.0)
-  );
-
   var out: VertexOut;
-  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+  out.position = vec4<f32>(ndc, 0.0, 1.0);
   out.color = vec4<f32>(1.0);
-  out.uv = uvs[vertex_index];
+  out.uv = uv;
   return out;
 }
 
 @fragment
-fn fs_quad(input: VertexOut) -> @location(0) vec4<f32> {
+fn fs_tile(input: VertexOut) -> @location(0) vec4<f32> {
   return textureSample(quad_texture, quad_sampler, input.uv);
 }
 
