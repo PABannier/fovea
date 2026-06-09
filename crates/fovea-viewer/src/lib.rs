@@ -147,8 +147,8 @@ impl FoveaViewer {
             .upload_tile_rgba(TileId { level, x, y }, width, height, rgba)
     }
 
-    #[wasm_bindgen(js_name = loadOverlayManifest)]
-    pub fn load_overlay_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = loadCellManifest)]
+    pub fn load_cell_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
         let manifest = CellOverlayManifest::from_json(manifest_json)?;
         let should_fit_overlay = self.renderer.slide_dimensions().is_none();
         let dimensions = manifest.dimensions();
@@ -183,20 +183,15 @@ impl FoveaViewer {
         Ok(())
     }
 
-    #[wasm_bindgen(js_name = visibleOverlayChunkRequests)]
-    pub fn visible_overlay_chunk_requests(&self, max_requests: u32) -> String {
+    #[wasm_bindgen(js_name = visibleCellChunkRequests)]
+    pub fn visible_cell_chunk_requests(&self, max_requests: u32) -> String {
         self.renderer
             .visible_overlay_chunk_requests(&self.camera, max_requests as usize)
             .unwrap_or_else(|| "[]".to_string())
     }
 
-    #[wasm_bindgen(js_name = uploadOverlayChunkBytes)]
-    pub fn upload_overlay_chunk_bytes(
-        &mut self,
-        x: u32,
-        y: u32,
-        bytes: &[u8],
-    ) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = uploadCellChunkBytes)]
+    pub fn upload_cell_chunk_bytes(&mut self, x: u32, y: u32, bytes: &[u8]) -> Result<(), JsValue> {
         self.renderer
             .upload_overlay_chunk_bytes(OverlayChunkId { x, y }, bytes)
     }
@@ -222,8 +217,8 @@ impl FoveaViewer {
             .upload_heatmap_tile_bytes(TileId { level, x, y }, width, height, bytes)
     }
 
-    #[wasm_bindgen(js_name = setOverlayVisibility)]
-    pub fn set_overlay_visibility(&mut self, visible: bool) {
+    #[wasm_bindgen(js_name = setCellVisibility)]
+    pub fn set_cell_visibility(&mut self, visible: bool) {
         self.renderer.set_overlay_visibility(visible);
         self.renderer.write_camera(&self.camera);
 
@@ -238,20 +233,20 @@ impl FoveaViewer {
         }
     }
 
-    #[wasm_bindgen(js_name = setOverlayOpacity)]
-    pub fn set_overlay_opacity(&mut self, opacity: f64) {
+    #[wasm_bindgen(js_name = setCellOpacity)]
+    pub fn set_cell_opacity(&mut self, opacity: f64) {
         self.renderer.set_overlay_opacity(opacity);
         self.renderer.write_camera(&self.camera);
     }
 
-    #[wasm_bindgen(js_name = setOverlayPointSize)]
-    pub fn set_overlay_point_size(&mut self, size_px: f64) {
+    #[wasm_bindgen(js_name = setCellPointSize)]
+    pub fn set_cell_point_size(&mut self, size_px: f64) {
         self.renderer.set_overlay_point_size(size_px);
         self.renderer.write_camera(&self.camera);
     }
 
-    #[wasm_bindgen(js_name = setOverlayOutlineWidth)]
-    pub fn set_overlay_outline_width(&mut self, width_px: f64) {
+    #[wasm_bindgen(js_name = setCellOutlineWidth)]
+    pub fn set_cell_outline_width(&mut self, width_px: f64) {
         self.renderer.set_overlay_outline_width(width_px);
         self.renderer.write_camera(&self.camera);
     }

@@ -26,8 +26,8 @@ const params = new URLSearchParams(window.location.search);
 const sampleMs = Number(params.get("durationMs") ?? "10000");
 const viewer = await FoveaViewer.create({
   canvas,
-  bundleUrl: params.get("bundle") ?? undefined,
-  overlayUrl: params.get("overlay") ?? undefined,
+  slideUrl: params.get("slide") ?? undefined,
+  cellsUrl: params.get("cells") ?? undefined,
   heatmapUrl: params.get("heatmap") ?? undefined
 });
 

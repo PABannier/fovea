@@ -20,8 +20,8 @@ function App(): React.ReactElement {
       const params = new URLSearchParams(window.location.search);
       const viewer = await FoveaViewer.create({
         canvas: canvasRef.current,
-        bundleUrl: params.get("bundle") ?? undefined,
-        overlayUrl: params.get("overlay") ?? undefined,
+        slideUrl: params.get("slide") ?? undefined,
+        cellsUrl: params.get("cells") ?? undefined,
         heatmapUrl: params.get("heatmap") ?? undefined,
         onStats: () => {
           if (!cancelled) {
@@ -38,7 +38,7 @@ function App(): React.ReactElement {
       viewerRef.current = viewer;
       viewer.start();
       setStatus(
-        [params.get("bundle") && "Slide", params.get("overlay") && "Cells", params.get("heatmap") && "Heatmap"]
+        [params.get("slide") && "Slide", params.get("cells") && "Cells", params.get("heatmap") && "Heatmap"]
           .filter(Boolean)
           .join(" + ") || "Synthetic"
       );

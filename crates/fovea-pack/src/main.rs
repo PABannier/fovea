@@ -1,17 +1,15 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use fovea_pack::{
-    pack_cells_protobuf, pack_heatmap_from_cell_overlay, pack_slide, CellOverlayPackOptions,
-    HeatmapOverlayPackOptions, ImageFormat, PackOptions,
-};
+use fovea_pack::{serve_sources, ImageFormat, ServeOptions};
 
 #[derive(Debug, Parser)]
 #[command(
     author,
     version,
-    about = "Native Fovea WSI ingestion and packing tools"
+    about = "Serve WSI slides and cell protobufs to Fovea"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -20,64 +18,37 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Convert an OpenSlide-readable WSI into a static Fovea slide bundle.
-    Slide(SlideArgs),
-    /// Convert a histotyper SlideSegmentationData protobuf into Fovea overlay chunks.
-    CellsProtobuf(CellsProtobufArgs),
-    /// Convert a Fovea cell overlay bundle into tiled density heatmap tiles.
-    HeatmapOverlay(HeatmapOverlayArgs),
+    /// Serve a WSI and optional protobuf cells directly.
+    Serve(ServeArgs),
 }
 
 #[derive(Debug, Parser)]
-struct SlideArgs {
+struct ServeArgs {
     /// Input whole-slide image, for example .svs or .ndpi.
     #[arg(long)]
     wsi: PathBuf,
 
-    /// Output .fovea bundle directory.
+    /// Optional protobuf file containing histotyper.SlideSegmentationData.
     #[arg(long)]
-    out: PathBuf,
+    cells_protobuf: Option<PathBuf>,
 
-    /// Output tile edge length in pixels.
+    /// Host interface to bind.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: IpAddr,
+
+    /// HTTP port to bind.
+    #[arg(long, default_value_t = 7878)]
+    port: u16,
+
+    /// Served slide tile edge length in pixels.
     #[arg(long, default_value_t = 512)]
     tile_size: u32,
 
-    /// Encoded tile format.
+    /// Encoded slide tile format.
     #[arg(long, value_enum, default_value_t = CliImageFormat::Webp)]
     image_format: CliImageFormat,
 
-    /// Skip tiles whose sampled pixels match the slide background.
-    #[arg(long)]
-    skip_background_tiles: bool,
-
-    /// Per-channel tolerance for background tile detection.
-    #[arg(long, default_value_t = 8)]
-    background_threshold: u8,
-
-    /// Remove an existing output bundle before writing.
-    #[arg(long)]
-    force: bool,
-
-    /// Number of tile extraction workers. Defaults to logical CPU count.
-    #[arg(long)]
-    jobs: Option<usize>,
-}
-
-#[derive(Debug, Parser)]
-struct CellsProtobufArgs {
-    /// Input protobuf file containing histotyper.SlideSegmentationData.
-    #[arg(long)]
-    proto: PathBuf,
-
-    /// Output overlay bundle directory.
-    #[arg(long)]
-    out: PathBuf,
-
-    /// Overlay id written into the manifest.
-    #[arg(long, default_value = "cells")]
-    id: String,
-
-    /// Spatial chunk edge length in level-0 slide pixels.
+    /// Spatial cell chunk edge length in level-0 slide pixels.
     #[arg(long, default_value_t = 4096)]
     chunk_size: u32,
 
@@ -85,36 +56,21 @@ struct CellsProtobufArgs {
     #[arg(long, default_value_t = 256)]
     max_vertices_per_cell: u16,
 
-    /// Remove an existing output bundle before writing.
+    /// Build and serve an in-memory density heatmap from the cells.
     #[arg(long)]
-    force: bool,
-}
-
-#[derive(Debug, Parser)]
-struct HeatmapOverlayArgs {
-    /// Input .overlay bundle created by the cells-protobuf command.
-    #[arg(long)]
-    overlay: PathBuf,
-
-    /// Output heatmap bundle directory.
-    #[arg(long)]
-    out: PathBuf,
-
-    /// Heatmap id written into the manifest.
-    #[arg(long, default_value = "cell_density")]
-    id: String,
+    heatmap: bool,
 
     /// Level-0 slide pixels represented by one heatmap pixel.
     #[arg(long, default_value_t = 128)]
-    bin_size: u32,
+    heatmap_bin_size: u32,
 
-    /// Output heatmap tile edge length in heatmap pixels.
+    /// Served heatmap tile edge length in heatmap pixels.
     #[arg(long, default_value_t = 256)]
-    tile_size: u32,
+    heatmap_tile_size: u32,
 
-    /// Remove an existing output bundle before writing.
-    #[arg(long)]
-    force: bool,
+    /// Maximum RAM used for encoded slide tile cache.
+    #[arg(long, default_value_t = 1024)]
+    tile_cache_mb: usize,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -138,33 +94,24 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Slide(args) => pack_slide(PackOptions {
-            wsi_path: args.wsi,
-            out_dir: args.out,
-            tile_size: args.tile_size,
-            image_format: args.image_format.into(),
-            skip_background_tiles: args.skip_background_tiles,
-            background_threshold: args.background_threshold,
-            force: args.force,
-            jobs: args.jobs.unwrap_or_else(num_cpus::get).max(1),
-        }),
-        Command::CellsProtobuf(args) => pack_cells_protobuf(CellOverlayPackOptions {
-            proto_path: args.proto,
-            out_dir: args.out,
-            id: args.id,
-            chunk_size: args.chunk_size,
-            max_vertices_per_cell: args.max_vertices_per_cell,
-            force: args.force,
-        }),
-        Command::HeatmapOverlay(args) => {
-            pack_heatmap_from_cell_overlay(HeatmapOverlayPackOptions {
-                overlay_dir: args.overlay,
-                out_dir: args.out,
-                id: args.id,
-                bin_size: args.bin_size,
+        Command::Serve(args) => {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(serve_sources(ServeOptions {
+                wsi_path: args.wsi,
+                cells_protobuf_path: args.cells_protobuf,
+                host: args.host,
+                port: args.port,
                 tile_size: args.tile_size,
-                force: args.force,
-            })
+                image_format: args.image_format.into(),
+                chunk_size: args.chunk_size,
+                max_vertices_per_cell: args.max_vertices_per_cell,
+                heatmap: args.heatmap,
+                heatmap_bin_size: args.heatmap_bin_size,
+                heatmap_tile_size: args.heatmap_tile_size,
+                tile_cache_mb: args.tile_cache_mb,
+            }))
         }
     }
 }

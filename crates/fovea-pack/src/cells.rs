@@ -1,9 +1,8 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    io::{BufWriter, Write},
-    path::{Path, PathBuf},
-    time::Instant,
+    io::Write,
+    path::PathBuf,
 };
 
 use anyhow::{anyhow, Context, Result};
@@ -11,13 +10,18 @@ use prost::Message;
 use serde::Serialize;
 
 #[derive(Clone, Debug)]
-pub struct CellOverlayPackOptions {
+pub struct CellLoadOptions {
     pub proto_path: PathBuf,
-    pub out_dir: PathBuf,
     pub id: String,
     pub chunk_size: u32,
     pub max_vertices_per_cell: u16,
-    pub force: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct InMemoryCells {
+    pub manifest_json: String,
+    pub chunks: HashMap<(u32, u32), Vec<u8>>,
+    pub(crate) manifest: CellManifest,
 }
 
 #[derive(Clone, Debug)]
@@ -66,66 +70,64 @@ impl BBox {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct ChunkKey {
+pub(crate) struct ChunkKey {
     x: u32,
     y: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CellOverlayManifest {
-    schema: String,
-    version: String,
-    id: String,
-    source_format: String,
-    slide_id: String,
-    slide_path: String,
-    mpp: f32,
-    width: u32,
-    height: u32,
-    chunk_width: u32,
-    chunk_height: u32,
-    chunk_cols: u32,
-    chunk_rows: u32,
-    cell_count: u64,
-    polygon_vertex_count: u64,
-    max_vertices_per_cell: u16,
-    classes: Vec<CellClassManifest>,
-    chunks: Vec<CellChunkManifest>,
+pub(crate) struct CellManifest {
+    pub(crate) schema: String,
+    pub(crate) version: String,
+    pub(crate) id: String,
+    pub(crate) source_format: String,
+    pub(crate) slide_id: String,
+    pub(crate) slide_path: String,
+    pub(crate) mpp: f32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) chunk_width: u32,
+    pub(crate) chunk_height: u32,
+    pub(crate) chunk_cols: u32,
+    pub(crate) chunk_rows: u32,
+    pub(crate) cell_count: u64,
+    pub(crate) polygon_vertex_count: u64,
+    pub(crate) max_vertices_per_cell: u16,
+    pub(crate) classes: Vec<CellClassManifest>,
+    pub(crate) chunks: Vec<CellChunkManifest>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CellClassManifest {
-    id: u16,
-    name: String,
+pub(crate) struct CellClassManifest {
+    pub(crate) id: u16,
+    pub(crate) name: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct CellChunkManifest {
-    x: u32,
-    y: u32,
-    path: String,
-    cell_count: u32,
-    polygon_vertex_count: u32,
-    byte_size: u64,
-    bbox: ChunkBBoxManifest,
+pub(crate) struct CellChunkManifest {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) path: String,
+    pub(crate) cell_count: u32,
+    pub(crate) polygon_vertex_count: u32,
+    pub(crate) byte_size: u64,
+    pub(crate) bbox: ChunkBBoxManifest,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ChunkBBoxManifest {
-    min_x: f32,
-    min_y: f32,
-    max_x: f32,
-    max_y: f32,
+pub(crate) struct ChunkBBoxManifest {
+    pub(crate) min_x: f32,
+    pub(crate) min_y: f32,
+    pub(crate) max_x: f32,
+    pub(crate) max_y: f32,
 }
 
-pub fn pack_cells_protobuf(options: CellOverlayPackOptions) -> Result<()> {
-    validate_options(&options)?;
-    let start = Instant::now();
-    let output_dir = prepare_output_dir(&options.out_dir, options.force)?;
+pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<InMemoryCells> {
+    validate_load_options(&options)?;
     let bytes = fs::read(&options.proto_path)
         .with_context(|| format!("failed to read {}", options.proto_path.display()))?;
 
@@ -138,41 +140,43 @@ pub fn pack_cells_protobuf(options: CellOverlayPackOptions) -> Result<()> {
     let packed = match new_proto::SlideSegmentationData::decode(bytes.as_slice()) {
         Ok(data) if looks_like_new_proto(&data) => {
             eprintln!("fovea-pack: decoded histotyper_v2 new_cell_masks protobuf");
-            pack_new_proto_data(&data, &options, &output_dir)?
+            decode_new_proto_data(&data, &options)?
         }
         _ => {
             let data = legacy_proto::SlideSegmentationData::decode(bytes.as_slice())
                 .with_context(|| format!("failed to decode {}", options.proto_path.display()))?;
             eprintln!("fovea-pack: decoded legacy cell_masks protobuf");
-            pack_legacy_proto_data(&data, &options, &output_dir)?
+            decode_legacy_proto_data(&data, &options)?
         }
     };
-    write_manifest(&output_dir.join("manifest.json"), &packed.manifest)?;
-    finalize_output_dir(&output_dir, &options.out_dir)?;
 
-    eprintln!(
-        "fovea-pack: done in {:.2}s, wrote {} cells into {} chunks",
-        start.elapsed().as_secs_f64(),
-        packed.manifest.cell_count,
-        packed.manifest.chunks.len()
-    );
-
-    Ok(())
+    Ok(packed.into_memory()?)
 }
 
-struct PackedOverlay {
-    manifest: CellOverlayManifest,
+struct PackedCells {
+    manifest: CellManifest,
+    chunks: HashMap<(u32, u32), Vec<u8>>,
+}
+
+impl PackedCells {
+    fn into_memory(self) -> Result<InMemoryCells> {
+        let manifest_json = serde_json::to_string_pretty(&self.manifest)?;
+        Ok(InMemoryCells {
+            manifest_json,
+            chunks: self.chunks,
+            manifest: self.manifest,
+        })
+    }
 }
 
 fn looks_like_new_proto(data: &new_proto::SlideSegmentationData) -> bool {
     !data.tiles.is_empty() || !data.cell_class_names.is_empty() || data.tile_size != 0
 }
 
-fn pack_new_proto_data(
+fn decode_new_proto_data(
     data: &new_proto::SlideSegmentationData,
-    options: &CellOverlayPackOptions,
-    output_dir: &Path,
-) -> Result<PackedOverlay> {
+    options: &CellLoadOptions,
+) -> Result<PackedCells> {
     let mut chunks: BTreeMap<ChunkKey, Vec<CellRecord>> = BTreeMap::new();
     let mut width = 0.0_f32;
     let mut height = 0.0_f32;
@@ -233,9 +237,9 @@ fn pack_new_proto_data(
         })
         .collect();
 
-    build_packed_overlay(
+    build_packed_cells(
         chunks,
-        OverlayManifestInput {
+        CellManifestInput {
             id: options.id.clone(),
             source_format: "histotyper_v2.SlideSegmentationData protobuf".to_string(),
             slide_id: data.slide_id.clone(),
@@ -248,15 +252,13 @@ fn pack_new_proto_data(
             classes,
             polygon_vertex_count: vertex_count,
         },
-        output_dir,
     )
 }
 
-fn pack_legacy_proto_data(
+fn decode_legacy_proto_data(
     data: &legacy_proto::SlideSegmentationData,
-    options: &CellOverlayPackOptions,
-    output_dir: &Path,
-) -> Result<PackedOverlay> {
+    options: &CellLoadOptions,
+) -> Result<PackedCells> {
     let mut class_ids = ClassIds::default();
     let mut chunks: BTreeMap<ChunkKey, Vec<CellRecord>> = BTreeMap::new();
     let mut width = 0.0_f32;
@@ -290,9 +292,9 @@ fn pack_legacy_proto_data(
         eprintln!("fovea-pack: skipped {invalid_polygons} invalid cell polygons");
     }
 
-    build_packed_overlay(
+    build_packed_cells(
         chunks,
-        OverlayManifestInput {
+        CellManifestInput {
             id: options.id.clone(),
             source_format: "histotyper.SlideSegmentationData protobuf".to_string(),
             slide_id: data.slide_id.clone().unwrap_or_default(),
@@ -305,7 +307,6 @@ fn pack_legacy_proto_data(
             classes: class_ids.into_manifest(),
             polygon_vertex_count: vertex_count,
         },
-        output_dir,
     )
 }
 
@@ -326,7 +327,7 @@ fn push_cell_to_chunk(
         .push(cell);
 }
 
-struct OverlayManifestInput {
+struct CellManifestInput {
     id: String,
     source_format: String,
     slide_id: String,
@@ -340,27 +341,21 @@ struct OverlayManifestInput {
     polygon_vertex_count: u64,
 }
 
-fn build_packed_overlay(
+fn build_packed_cells(
     chunks: BTreeMap<ChunkKey, Vec<CellRecord>>,
-    input: OverlayManifestInput,
-    output_dir: &Path,
-) -> Result<PackedOverlay> {
-    let chunk_dir = output_dir.join("chunks");
-    fs::create_dir_all(&chunk_dir)
-        .with_context(|| format!("failed to create {}", chunk_dir.display()))?;
-
+    input: CellManifestInput,
+) -> Result<PackedCells> {
     let width = input.width.ceil().max(1.0) as u32;
     let height = input.height.ceil().max(1.0) as u32;
     let chunk_cols = width.div_ceil(input.chunk_size);
     let chunk_rows = height.div_ceil(input.chunk_size);
     let mut chunk_manifests = Vec::with_capacity(chunks.len());
+    let mut chunk_bytes = HashMap::with_capacity(chunks.len());
 
     for (key, cells) in chunks {
         let file_name = format!("{}_{}.fovc", key.x, key.y);
-        let path = chunk_dir.join(&file_name);
         let relative_path = format!("chunks/{file_name}");
-        let stats = write_chunk(&path, key, input.chunk_size, &cells)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        let (bytes, stats) = encode_chunk(key, input.chunk_size, &cells)?;
 
         chunk_manifests.push(CellChunkManifest {
             x: key.x,
@@ -376,11 +371,12 @@ fn build_packed_overlay(
                 max_y: stats.bbox.max_y,
             },
         });
+        chunk_bytes.insert((key.x, key.y), bytes);
     }
 
-    Ok(PackedOverlay {
-        manifest: CellOverlayManifest {
-            schema: "fovea.cell-overlay".to_string(),
+    Ok(PackedCells {
+        manifest: CellManifest {
+            schema: "fovea.cells".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             id: input.id,
             source_format: input.source_format,
@@ -402,6 +398,7 @@ fn build_packed_overlay(
             classes: input.classes,
             chunks: chunk_manifests,
         },
+        chunks: chunk_bytes,
     })
 }
 
@@ -634,13 +631,12 @@ struct ChunkStats {
     bbox: BBox,
 }
 
-fn write_chunk(
-    path: &Path,
+fn encode_chunk(
     key: ChunkKey,
     chunk_size: u32,
     cells: &[CellRecord],
-) -> Result<ChunkStats> {
-    let mut writer = BufWriter::new(fs::File::create(path)?);
+) -> Result<(Vec<u8>, ChunkStats)> {
+    let mut writer = Vec::new();
     let origin_x = (key.x * chunk_size) as f32;
     let origin_y = (key.y * chunk_size) as f32;
     let polygon_vertex_count = cells
@@ -697,13 +693,37 @@ fn write_chunk(
         }
     }
 
-    writer.flush()?;
-    let byte_size = fs::metadata(path)?.len();
-    Ok(ChunkStats {
-        polygon_vertex_count,
-        byte_size,
-        bbox,
-    })
+    let byte_size = writer.len() as u64;
+    Ok((
+        writer,
+        ChunkStats {
+            polygon_vertex_count,
+            byte_size,
+            bbox,
+        },
+    ))
+}
+
+impl InMemoryCells {
+    pub(crate) fn width(&self) -> u32 {
+        self.manifest.width
+    }
+
+    pub(crate) fn height(&self) -> u32 {
+        self.manifest.height
+    }
+
+    pub(crate) fn chunk_width(&self) -> u32 {
+        self.manifest.chunk_width
+    }
+
+    pub(crate) fn chunk_height(&self) -> u32 {
+        self.manifest.chunk_height
+    }
+
+    pub(crate) fn chunks(&self) -> &[CellChunkManifest] {
+        &self.manifest.chunks
+    }
 }
 
 fn quantize(value: f32, origin: f32, chunk_size: u32) -> u16 {
@@ -731,7 +751,7 @@ fn write_f32(writer: &mut dyn Write, value: f32) -> Result<()> {
     Ok(())
 }
 
-fn validate_options(options: &CellOverlayPackOptions) -> Result<()> {
+fn validate_load_options(options: &CellLoadOptions) -> Result<()> {
     if !options.proto_path.exists() {
         return Err(anyhow!(
             "input protobuf does not exist: {}",
@@ -745,57 +765,6 @@ fn validate_options(options: &CellOverlayPackOptions) -> Result<()> {
 
     Ok(())
 }
-
-fn prepare_output_dir(out_dir: &Path, force: bool) -> Result<PathBuf> {
-    if out_dir.exists() {
-        if force {
-            fs::remove_dir_all(out_dir)
-                .with_context(|| format!("failed to remove {}", out_dir.display()))?;
-        } else {
-            return Err(anyhow!(
-                "output directory already exists: {} (use --force to replace it)",
-                out_dir.display()
-            ));
-        }
-    }
-
-    let partial_dir = partial_output_dir(out_dir);
-
-    if partial_dir.exists() {
-        fs::remove_dir_all(&partial_dir)
-            .with_context(|| format!("failed to remove stale {}", partial_dir.display()))?;
-    }
-
-    fs::create_dir_all(&partial_dir)
-        .with_context(|| format!("failed to create {}", partial_dir.display()))?;
-    Ok(partial_dir)
-}
-
-fn finalize_output_dir(partial_dir: &Path, out_dir: &Path) -> Result<()> {
-    fs::rename(partial_dir, out_dir).with_context(|| {
-        format!(
-            "failed to move {} to {}",
-            partial_dir.display(),
-            out_dir.display()
-        )
-    })
-}
-
-fn partial_output_dir(out_dir: &Path) -> PathBuf {
-    let name = out_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("overlay");
-    out_dir.with_file_name(format!("{name}.partial"))
-}
-
-fn write_manifest(path: &Path, manifest: &CellOverlayManifest) -> Result<()> {
-    let file =
-        fs::File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
-    serde_json::to_writer_pretty(BufWriter::new(file), manifest)?;
-    Ok(())
-}
-
 mod new_proto {
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct TileSegmentationData {

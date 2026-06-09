@@ -9,44 +9,44 @@
     <main id="app">
       <canvas id="viewer"></canvas>
       <section class="toolbar" aria-label="Viewer controls">
-        <form id="bundle-form" class="bundle-form">
+        <form id="source-form" class="source-form">
           <input
-            id="bundle-url"
+            id="slide-url"
             type="text"
             autocomplete="off"
             spellcheck="false"
-            placeholder="/@fs/.../tcga-aa.fovea"
+            placeholder="http://127.0.0.1:7878/slide"
           />
-          <button id="load-bundle" type="submit">Load</button>
+          <button id="load-slide" type="submit">Load</button>
         </form>
-        <form id="overlay-form" class="bundle-form">
+        <form id="cells-form" class="source-form">
           <input
-            id="overlay-url"
+            id="cells-url"
             type="text"
             autocomplete="off"
             spellcheck="false"
-            placeholder="/@fs/.../cells.overlay"
+            placeholder="http://127.0.0.1:7878/cells"
           />
-          <button id="load-overlay" type="submit">Overlay</button>
+          <button id="load-cells" type="submit">Cells</button>
         </form>
-        <form id="heatmap-form" class="bundle-form">
+        <form id="heatmap-form" class="source-form">
           <input
             id="heatmap-url"
             type="text"
             autocomplete="off"
             spellcheck="false"
-            placeholder="/@fs/.../cell-density.heatmap"
+            placeholder="http://127.0.0.1:7878/heatmap"
           />
           <button id="load-heatmap" type="submit">Heatmap</button>
         </form>
         <button id="reset-camera" type="button">Reset</button>
         <label class="cell-toggle">
-          <input id="overlay-visible" type="checkbox" checked />
+          <input id="cells-visible" type="checkbox" checked />
           Cells
         </label>
         <label class="opacity-control">
           Opacity
-          <input id="overlay-opacity" type="range" min="0" max="1" step="0.01" value="0.78" />
+          <input id="cells-opacity" type="range" min="0" max="1" step="0.01" value="0.78" />
         </label>
         <label class="cell-toggle">
           <input id="heatmap-visible" type="checkbox" checked />

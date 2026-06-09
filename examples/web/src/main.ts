@@ -5,14 +5,14 @@ const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
 const toolbar = document.querySelector<HTMLElement>(".toolbar");
 const statsPanel = document.querySelector<HTMLElement>(".stats");
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-camera");
-const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
-const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
-const overlayForm = document.querySelector<HTMLFormElement>("#overlay-form");
-const overlayInput = document.querySelector<HTMLInputElement>("#overlay-url");
+const slideForm = document.querySelector<HTMLFormElement>("#source-form");
+const slideInput = document.querySelector<HTMLInputElement>("#slide-url");
+const cellsForm = document.querySelector<HTMLFormElement>("#cells-form");
+const cellsInput = document.querySelector<HTMLInputElement>("#cells-url");
 const heatmapForm = document.querySelector<HTMLFormElement>("#heatmap-form");
 const heatmapInput = document.querySelector<HTMLInputElement>("#heatmap-url");
-const overlayVisible = document.querySelector<HTMLInputElement>("#overlay-visible");
-const overlayOpacity = document.querySelector<HTMLInputElement>("#overlay-opacity");
+const cellsVisible = document.querySelector<HTMLInputElement>("#cells-visible");
+const cellsOpacity = document.querySelector<HTMLInputElement>("#cells-opacity");
 const heatmapVisible = document.querySelector<HTMLInputElement>("#heatmap-visible");
 const heatmapOpacity = document.querySelector<HTMLInputElement>("#heatmap-opacity");
 const heatmapMin = document.querySelector<HTMLInputElement>("#heatmap-min");
@@ -25,14 +25,14 @@ if (
   !toolbar ||
   !statsPanel ||
   !resetButton ||
-  !bundleForm ||
-  !bundleInput ||
-  !overlayForm ||
-  !overlayInput ||
+  !slideForm ||
+  !slideInput ||
+  !cellsForm ||
+  !cellsInput ||
   !heatmapForm ||
   !heatmapInput ||
-  !overlayVisible ||
-  !overlayOpacity ||
+  !cellsVisible ||
+  !cellsOpacity ||
   !heatmapVisible ||
   !heatmapOpacity ||
   !heatmapMin ||
@@ -47,22 +47,22 @@ const viewerCanvas = canvas;
 const viewerToolbar = toolbar;
 const viewerStatsPanel = statsPanel;
 const resetCameraButton = resetButton;
-const bundleUrlForm = bundleForm;
-const bundleUrlInput = bundleInput;
-const overlayUrlForm = overlayForm;
-const overlayUrlInput = overlayInput;
+const slideUrlForm = slideForm;
+const slideUrlInput = slideInput;
+const cellsUrlForm = cellsForm;
+const cellsUrlInput = cellsInput;
 const heatmapUrlForm = heatmapForm;
 const heatmapUrlInput = heatmapInput;
-const overlayVisibleInput = overlayVisible;
-const overlayOpacityInput = overlayOpacity;
+const cellsVisibleInput = cellsVisible;
+const cellsOpacityInput = cellsOpacity;
 const heatmapVisibleInput = heatmapVisible;
 const heatmapOpacityInput = heatmapOpacity;
 const heatmapMinInput = heatmapMin;
 const heatmapMaxInput = heatmapMax;
 const heatmapColormapSelect = heatmapColormap;
-const bundleLoadStatus = loadStatus;
+const loadStatusElement = loadStatus;
 let slideLoaded = false;
-let overlayLoaded = false;
+let cellsLoaded = false;
 let heatmapLoaded = false;
 
 const values = {
@@ -97,8 +97,8 @@ function formatBytes(value: number): string {
 
 async function main(): Promise<void> {
   const params = new URLSearchParams(window.location.search);
-  const bundleParam = params.get("bundle");
-  const overlayParam = params.get("overlay");
+  const slideParam = params.get("slide");
+  const cellsParam = params.get("cells");
   const heatmapParam = params.get("heatmap");
   const showControls = queryFlag(params, "controls", false);
   const showPerformance = queryFlag(params, "performance", false);
@@ -106,12 +106,12 @@ async function main(): Promise<void> {
   viewerToolbar.hidden = !showControls;
   viewerStatsPanel.hidden = !showPerformance;
 
-  if (bundleParam) {
-    bundleUrlInput.value = bundleParam;
+  if (slideParam) {
+    slideUrlInput.value = slideParam;
   }
 
-  if (overlayParam) {
-    overlayUrlInput.value = overlayParam;
+  if (cellsParam) {
+    cellsUrlInput.value = cellsParam;
   }
 
   if (heatmapParam) {
@@ -135,11 +135,11 @@ async function main(): Promise<void> {
   });
 
   resetCameraButton.addEventListener("click", () => viewer.resetCamera());
-  overlayVisibleInput.addEventListener("change", () => {
-    viewer.setLayerVisibility("cells", overlayVisibleInput.checked);
+  cellsVisibleInput.addEventListener("change", () => {
+    viewer.setLayerVisibility("cells", cellsVisibleInput.checked);
   });
-  overlayOpacityInput.addEventListener("input", () => {
-    viewer.setLayerOpacity("cells", Number(overlayOpacityInput.value));
+  cellsOpacityInput.addEventListener("input", () => {
+    viewer.setLayerOpacity("cells", Number(cellsOpacityInput.value));
   });
   heatmapVisibleInput.addEventListener("change", () => {
     viewer.setLayerVisibility("heatmap", heatmapVisibleInput.checked);
@@ -164,14 +164,14 @@ async function main(): Promise<void> {
     setText("cell", `${event.cellId} / class ${event.classId ?? "?"}`);
   });
 
-  bundleUrlForm.addEventListener("submit", (event) => {
+  slideUrlForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void loadBundleFromInput(viewer);
+    void loadSlideFromInput(viewer);
   });
 
-  overlayUrlForm.addEventListener("submit", (event) => {
+  cellsUrlForm.addEventListener("submit", (event) => {
     event.preventDefault();
-    void loadOverlayFromInput(viewer);
+    void loadCellsFromInput(viewer);
   });
 
   heatmapUrlForm.addEventListener("submit", (event) => {
@@ -181,12 +181,12 @@ async function main(): Promise<void> {
 
   viewer.start();
 
-  if (bundleUrlInput.value.trim()) {
-    void loadBundleFromInput(viewer);
+  if (slideUrlInput.value.trim()) {
+    void loadSlideFromInput(viewer);
   }
 
-  if (overlayUrlInput.value.trim()) {
-    void loadOverlayFromInput(viewer);
+  if (cellsUrlInput.value.trim()) {
+    void loadCellsFromInput(viewer);
   }
 
   if (heatmapUrlInput.value.trim()) {
@@ -194,42 +194,42 @@ async function main(): Promise<void> {
   }
 }
 
-async function loadBundleFromInput(viewer: FoveaViewer): Promise<void> {
-  const bundleUrl = bundleUrlInput.value.trim();
+async function loadSlideFromInput(viewer: FoveaViewer): Promise<void> {
+  const slideUrl = slideUrlInput.value.trim();
 
-  if (!bundleUrl) {
+  if (!slideUrl) {
     return;
   }
 
-  bundleLoadStatus.textContent = "Loading";
+  loadStatusElement.textContent = "Loading";
 
   try {
-    await viewer.loadBundle(bundleUrl);
+    await viewer.loadSlide(slideUrl);
     slideLoaded = true;
     updateLoadStatus();
   } catch (error) {
     slideLoaded = false;
-    bundleLoadStatus.textContent = "Load failed";
+    loadStatusElement.textContent = "Load failed";
     console.error(error);
   }
 }
 
-async function loadOverlayFromInput(viewer: FoveaViewer): Promise<void> {
-  const overlayUrl = overlayUrlInput.value.trim();
+async function loadCellsFromInput(viewer: FoveaViewer): Promise<void> {
+  const cellsUrl = cellsUrlInput.value.trim();
 
-  if (!overlayUrl) {
+  if (!cellsUrl) {
     return;
   }
 
-  bundleLoadStatus.textContent = "Overlay";
+  loadStatusElement.textContent = "Cells";
 
   try {
-    await viewer.loadOverlay(overlayUrl);
-    overlayLoaded = true;
+    await viewer.loadCells(cellsUrl);
+    cellsLoaded = true;
     updateLoadStatus();
   } catch (error) {
-    overlayLoaded = false;
-    bundleLoadStatus.textContent = "Overlay failed";
+    cellsLoaded = false;
+    loadStatusElement.textContent = "Cells failed";
     console.error(error);
   }
 }
@@ -241,7 +241,7 @@ async function loadHeatmapFromInput(viewer: FoveaViewer): Promise<void> {
     return;
   }
 
-  bundleLoadStatus.textContent = "Heatmap";
+  loadStatusElement.textContent = "Heatmap";
 
   try {
     await viewer.loadHeatmap(heatmapUrl);
@@ -249,7 +249,7 @@ async function loadHeatmapFromInput(viewer: FoveaViewer): Promise<void> {
     updateLoadStatus();
   } catch (error) {
     heatmapLoaded = false;
-    bundleLoadStatus.textContent = "Heatmap failed";
+    loadStatusElement.textContent = "Heatmap failed";
     console.error(error);
   }
 }
@@ -264,20 +264,20 @@ function updateHeatmapRange(viewer: FoveaViewer): void {
 }
 
 function updateLoadStatus(): void {
-  if (slideLoaded && overlayLoaded && heatmapLoaded) {
-    bundleLoadStatus.textContent = "Slide + cells + heatmap";
-  } else if (slideLoaded && overlayLoaded) {
-    bundleLoadStatus.textContent = "Slide + cells";
+  if (slideLoaded && cellsLoaded && heatmapLoaded) {
+    loadStatusElement.textContent = "Slide + cells + heatmap";
+  } else if (slideLoaded && cellsLoaded) {
+    loadStatusElement.textContent = "Slide + cells";
   } else if (slideLoaded && heatmapLoaded) {
-    bundleLoadStatus.textContent = "Slide + heatmap";
+    loadStatusElement.textContent = "Slide + heatmap";
   } else if (slideLoaded) {
-    bundleLoadStatus.textContent = "Slide";
-  } else if (overlayLoaded) {
-    bundleLoadStatus.textContent = "Cells";
+    loadStatusElement.textContent = "Slide";
+  } else if (cellsLoaded) {
+    loadStatusElement.textContent = "Cells";
   } else if (heatmapLoaded) {
-    bundleLoadStatus.textContent = "Heatmap";
+    loadStatusElement.textContent = "Heatmap";
   } else {
-    bundleLoadStatus.textContent = "Synthetic";
+    loadStatusElement.textContent = "Synthetic";
   }
 }
 

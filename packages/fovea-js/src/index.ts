@@ -8,14 +8,14 @@ export type BenchmarkPointCount = 10_000 | 100_000 | 500_000 | 1_000_000;
 export interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
   pointCount?: BenchmarkPointCount;
-  bundleUrl?: string;
-  overlayUrl?: string;
+  slideUrl?: string;
+  cellsUrl?: string;
   heatmapUrl?: string;
   tileRequestBatchSize?: number;
-  overlayRequestBatchSize?: number;
+  cellsRequestBatchSize?: number;
   heatmapRequestBatchSize?: number;
   maxConcurrentTileRequests?: number;
-  maxConcurrentOverlayRequests?: number;
+  maxConcurrentCellsRequests?: number;
   maxConcurrentHeatmapRequests?: number;
   onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 }
@@ -48,7 +48,7 @@ export interface PerformanceStats {
   gpuBufferMemoryBytes: number;
   cpuMemoryBytes: number;
   inflightTileRequests: number;
-  inflightOverlayRequests: number;
+  inflightCellRequests: number;
   inflightHeatmapRequests: number;
 }
 
@@ -94,7 +94,7 @@ interface TileRequest {
   priority: number;
 }
 
-interface OverlayChunkRequest {
+interface CellChunkRequest {
   x: number;
   y: number;
   path: string;
@@ -117,22 +117,22 @@ interface HeatmapTileRequest {
 export class FoveaViewer {
   private animationFrame = 0;
   private destroyed = false;
-  private bundleVersion = 0;
-  private overlayVersion = 0;
+  private slideVersion = 0;
+  private cellsVersion = 0;
   private heatmapVersion = 0;
   private tileBaseUrl: string | null = null;
-  private overlayBaseUrl: string | null = null;
+  private cellsBaseUrl: string | null = null;
   private heatmapBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
   private pointerDown: { clientX: number; clientY: number } | null = null;
   private readonly tileRequestBatchSize: number;
-  private readonly overlayRequestBatchSize: number;
+  private readonly cellsRequestBatchSize: number;
   private readonly heatmapRequestBatchSize: number;
   private readonly maxConcurrentTileRequests: number;
-  private readonly maxConcurrentOverlayRequests: number;
+  private readonly maxConcurrentCellsRequests: number;
   private readonly maxConcurrentHeatmapRequests: number;
   private readonly inflightTiles = new Map<string, AbortController>();
-  private readonly inflightOverlayChunks = new Map<string, AbortController>();
+  private readonly inflightCellChunks = new Map<string, AbortController>();
   private readonly inflightHeatmapTiles = new Map<string, AbortController>();
   private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
@@ -146,10 +146,10 @@ export class FoveaViewer {
     options: FoveaViewerOptions
   ) {
     this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
-    this.overlayRequestBatchSize = options.overlayRequestBatchSize ?? 64;
+    this.cellsRequestBatchSize = options.cellsRequestBatchSize ?? 64;
     this.heatmapRequestBatchSize = options.heatmapRequestBatchSize ?? 64;
     this.maxConcurrentTileRequests = options.maxConcurrentTileRequests ?? 8;
-    this.maxConcurrentOverlayRequests = options.maxConcurrentOverlayRequests ?? 6;
+    this.maxConcurrentCellsRequests = options.maxConcurrentCellsRequests ?? 6;
     this.maxConcurrentHeatmapRequests = options.maxConcurrentHeatmapRequests ?? 6;
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
@@ -170,12 +170,12 @@ export class FoveaViewer {
       viewer.setPointCount(options.pointCount);
     }
 
-    if (options.bundleUrl) {
-      await viewer.loadBundle(options.bundleUrl);
+    if (options.slideUrl) {
+      await viewer.loadSlide(options.slideUrl);
     }
 
-    if (options.overlayUrl) {
-      await viewer.loadOverlay(options.overlayUrl);
+    if (options.cellsUrl) {
+      await viewer.loadCells(options.cellsUrl);
     }
 
     if (options.heatmapUrl) {
@@ -197,7 +197,7 @@ export class FoveaViewer {
 
       this.pumpTileRequests();
       this.pumpHeatmapRequests();
-      this.pumpOverlayRequests();
+      this.pumpCellRequests();
       const stats = this.wasm.render();
       this.dispatchDrainedEvents();
       this.observeFrame(stats);
@@ -218,25 +218,25 @@ export class FoveaViewer {
     this.destroyed = true;
     this.stop();
     this.abortInflightTiles();
-    this.abortInflightOverlayChunks();
+    this.abortInflightCellChunks();
     this.abortInflightHeatmapTiles();
     this.resizeObserver.disconnect();
   }
 
-  async loadBundle(bundleUrl: string): Promise<void> {
-    const version = ++this.bundleVersion;
+  async loadSlide(slideUrl: string): Promise<void> {
+    const version = ++this.slideVersion;
     this.abortInflightTiles();
 
-    const manifestUrl = manifestUrlForBundle(bundleUrl);
+    const manifestUrl = manifestUrlForSource(slideUrl);
     const response = await fetch(manifestUrl, { cache: "no-cache" });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch manifest: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to fetch slide manifest: ${response.status} ${response.statusText}`);
     }
 
     const manifestJson = await response.text();
 
-    if (version !== this.bundleVersion || this.destroyed) {
+    if (version !== this.slideVersion || this.destroyed) {
       return;
     }
 
@@ -245,25 +245,25 @@ export class FoveaViewer {
     this.frameTimes.length = 0;
   }
 
-  async loadOverlay(overlayUrl: string): Promise<void> {
-    const version = ++this.overlayVersion;
-    this.abortInflightOverlayChunks();
+  async loadCells(cellsUrl: string): Promise<void> {
+    const version = ++this.cellsVersion;
+    this.abortInflightCellChunks();
 
-    const manifestUrl = manifestUrlForBundle(overlayUrl);
+    const manifestUrl = manifestUrlForSource(cellsUrl);
     const response = await fetch(manifestUrl, { cache: "no-cache" });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch overlay manifest: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to fetch cell manifest: ${response.status} ${response.statusText}`);
     }
 
     const manifestJson = await response.text();
 
-    if (version !== this.overlayVersion || this.destroyed) {
+    if (version !== this.cellsVersion || this.destroyed) {
       return;
     }
 
-    this.overlayBaseUrl = new URL(".", manifestUrl).toString();
-    this.wasm.loadOverlayManifest(manifestJson);
+    this.cellsBaseUrl = new URL(".", manifestUrl).toString();
+    this.wasm.loadCellManifest(manifestJson);
     this.frameTimes.length = 0;
   }
 
@@ -271,7 +271,7 @@ export class FoveaViewer {
     const version = ++this.heatmapVersion;
     this.abortInflightHeatmapTiles();
 
-    const manifestUrl = manifestUrlForBundle(heatmapUrl);
+    const manifestUrl = manifestUrlForSource(heatmapUrl);
     const response = await fetch(manifestUrl, { cache: "no-cache" });
 
     if (!response.ok) {
@@ -295,7 +295,7 @@ export class FoveaViewer {
 
   setLayerVisibility(layerId: "cells" | "heatmap" | string, visible: boolean): void {
     if (layerId === "cells") {
-      this.wasm.setOverlayVisibility(visible);
+      this.wasm.setCellVisibility(visible);
     } else {
       this.wasm.setHeatmapVisibility(visible);
     }
@@ -303,7 +303,7 @@ export class FoveaViewer {
 
   setLayerOpacity(layerId: "cells" | "heatmap" | string, opacity: number): void {
     if (layerId === "cells") {
-      this.wasm.setOverlayOpacity(opacity);
+      this.wasm.setCellOpacity(opacity);
     } else {
       this.wasm.setHeatmapOpacity(opacity);
     }
@@ -317,12 +317,12 @@ export class FoveaViewer {
     this.wasm.setHeatmapColormap(colormap);
   }
 
-  setOverlayPointSize(sizePx: number): void {
-    this.wasm.setOverlayPointSize(sizePx);
+  setCellPointSize(sizePx: number): void {
+    this.wasm.setCellPointSize(sizePx);
   }
 
-  setOverlayOutlineWidth(widthPx: number): void {
-    this.wasm.setOverlayOutlineWidth(widthPx);
+  setCellOutlineWidth(widthPx: number): void {
+    this.wasm.setCellOutlineWidth(widthPx);
   }
 
   on<K extends keyof FoveaViewerEvents>(
@@ -379,7 +379,7 @@ export class FoveaViewer {
       gpuBufferMemoryBytes: gpuBytes,
       cpuMemoryBytes: cpuBytes,
       inflightTileRequests: this.inflightTiles.size,
-      inflightOverlayRequests: this.inflightOverlayChunks.size,
+      inflightCellRequests: this.inflightCellChunks.size,
       inflightHeatmapRequests: this.inflightHeatmapTiles.size
     };
   }
@@ -505,7 +505,7 @@ export class FoveaViewer {
       }
 
       const controller = new AbortController();
-      const version = this.bundleVersion;
+      const version = this.slideVersion;
       this.inflightTiles.set(key, controller);
       void this.loadTile(request, controller, version)
         .catch((error: unknown) => {
@@ -532,44 +532,44 @@ export class FoveaViewer {
     }
   }
 
-  private pumpOverlayRequests(): void {
-    if (!this.overlayBaseUrl || this.destroyed) {
+  private pumpCellRequests(): void {
+    if (!this.cellsBaseUrl || this.destroyed) {
       return;
     }
 
-    const requests = this.parseVisibleOverlayChunkRequests();
-    const wanted = new Set(requests.map((request) => overlayChunkKey(request)));
+    const requests = this.parseVisibleCellChunkRequests();
+    const wanted = new Set(requests.map((request) => cellChunkKey(request)));
 
-    for (const [key, controller] of this.inflightOverlayChunks) {
+    for (const [key, controller] of this.inflightCellChunks) {
       if (!wanted.has(key)) {
         controller.abort();
-        this.inflightOverlayChunks.delete(key);
+        this.inflightCellChunks.delete(key);
       }
     }
 
     for (const request of requests) {
-      if (this.inflightOverlayChunks.size >= this.maxConcurrentOverlayRequests) {
+      if (this.inflightCellChunks.size >= this.maxConcurrentCellsRequests) {
         break;
       }
 
-      const key = overlayChunkKey(request);
+      const key = cellChunkKey(request);
 
-      if (this.inflightOverlayChunks.has(key)) {
+      if (this.inflightCellChunks.has(key)) {
         continue;
       }
 
       const controller = new AbortController();
-      const version = this.overlayVersion;
-      this.inflightOverlayChunks.set(key, controller);
-      void this.loadOverlayChunk(request, controller, version)
+      const version = this.cellsVersion;
+      this.inflightCellChunks.set(key, controller);
+      void this.loadCellChunk(request, controller, version)
         .catch((error: unknown) => {
           if (!controller.signal.aborted) {
             console.error(error);
           }
         })
         .finally(() => {
-          if (this.inflightOverlayChunks.get(key) === controller) {
-            this.inflightOverlayChunks.delete(key);
+          if (this.inflightCellChunks.get(key) === controller) {
+            this.inflightCellChunks.delete(key);
           }
         });
     }
@@ -666,45 +666,45 @@ export class FoveaViewer {
     );
   }
 
-  private parseVisibleOverlayChunkRequests(): OverlayChunkRequest[] {
-    const raw = this.wasm.visibleOverlayChunkRequests(this.overlayRequestBatchSize);
+  private parseVisibleCellChunkRequests(): CellChunkRequest[] {
+    const raw = this.wasm.visibleCellChunkRequests(this.cellsRequestBatchSize);
 
     try {
-      const requests = JSON.parse(raw) as OverlayChunkRequest[];
+      const requests = JSON.parse(raw) as CellChunkRequest[];
       return requests.sort((a, b) => a.priority - b.priority);
     } catch {
       return [];
     }
   }
 
-  private async loadOverlayChunk(
-    request: OverlayChunkRequest,
+  private async loadCellChunk(
+    request: CellChunkRequest,
     controller: AbortController,
     version: number
   ): Promise<void> {
-    const overlayBaseUrl = this.overlayBaseUrl;
+    const cellsBaseUrl = this.cellsBaseUrl;
 
-    if (!overlayBaseUrl) {
+    if (!cellsBaseUrl) {
       return;
     }
 
-    const chunkUrl = new URL(request.path, overlayBaseUrl);
+    const chunkUrl = new URL(request.path, cellsBaseUrl);
     const response = await fetch(chunkUrl, {
       cache: "force-cache",
       signal: controller.signal
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch overlay chunk ${request.path}: ${response.status}`);
+      throw new Error(`Failed to fetch cell chunk ${request.path}: ${response.status}`);
     }
 
     const bytes = new Uint8Array(await response.arrayBuffer());
 
-    if (controller.signal.aborted || version !== this.overlayVersion || this.destroyed) {
+    if (controller.signal.aborted || version !== this.cellsVersion || this.destroyed) {
       return;
     }
 
-    this.wasm.uploadOverlayChunkBytes(request.x, request.y, bytes);
+    this.wasm.uploadCellChunkBytes(request.x, request.y, bytes);
   }
 
   private async loadTile(
@@ -730,7 +730,7 @@ export class FoveaViewer {
 
     const blob = await response.blob();
 
-    if (controller.signal.aborted || version !== this.bundleVersion || this.destroyed) {
+    if (controller.signal.aborted || version !== this.slideVersion || this.destroyed) {
       return;
     }
 
@@ -739,7 +739,7 @@ export class FoveaViewer {
     try {
       const rgba = decodeBitmapRgba(bitmap, request.width, request.height);
 
-      if (controller.signal.aborted || version !== this.bundleVersion || this.destroyed) {
+      if (controller.signal.aborted || version !== this.slideVersion || this.destroyed) {
         return;
       }
 
@@ -829,12 +829,12 @@ export class FoveaViewer {
     this.inflightTiles.clear();
   }
 
-  private abortInflightOverlayChunks(): void {
-    for (const controller of this.inflightOverlayChunks.values()) {
+  private abortInflightCellChunks(): void {
+    for (const controller of this.inflightCellChunks.values()) {
       controller.abort();
     }
 
-    this.inflightOverlayChunks.clear();
+    this.inflightCellChunks.clear();
   }
 
   private abortInflightHeatmapTiles(): void {
@@ -861,8 +861,8 @@ function bytesToMiB(bytes: number): number {
   return bytes / (1024 * 1024);
 }
 
-function manifestUrlForBundle(bundleUrl: string): URL {
-  const url = new URL(bundleUrl, window.location.href);
+function manifestUrlForSource(slideUrl: string): URL {
+  const url = new URL(slideUrl, window.location.href);
 
   if (url.pathname.endsWith(".json")) {
     return url;
@@ -876,7 +876,7 @@ function tileKey(request: TileRequest): string {
   return `${request.level}/${request.x}/${request.y}`;
 }
 
-function overlayChunkKey(request: OverlayChunkRequest): string {
+function cellChunkKey(request: CellChunkRequest): string {
   return `${request.x}/${request.y}`;
 }
 

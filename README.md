@@ -1,74 +1,45 @@
 # Fovea
 
-Fovea is a WebGPU whole-slide image viewer for pathology slides and AI-native overlays. It renders precomputed WSI tile pyramids, protobuf-derived cell masks, and density heatmaps from static bundles, with smooth pan/zoom, hover/click picking, and runtime performance metrics.
+Fovea is a WebGPU whole-slide image viewer for pathology slides and AI-native cell outputs. It serves OpenSlide-readable WSI files and histotyper protobuf cell masks directly, then streams only the visible slide tiles, cell chunks, and heatmap tiles needed for smooth pan/zoom.
 
-The browser package is `@fovea/viewer`. Native packing tools live in `fovea-pack`.
+The browser package is `@fovea/viewer`. The native data server is `fovea-pack`.
 
 ## Get Started
 
-### 1. Build the workspace
+Build the workspace:
 
 ```sh
 npm install
 npm run build
 ```
 
-### 2. Generate viewer bundles
-
-Pack a whole-slide image:
-
-```sh
-cargo run -p fovea-pack -- slide \
-  --wsi /path/to/slide.svs \
-  --out ./target/case.slide.fovea \
-  --tile-size 512 \
-  --image-format webp \
-  --skip-background-tiles \
-  --force
-```
-
-Pack protobuf cell masks:
-
-```sh
-cargo run -p fovea-pack -- cells-protobuf \
-  --proto /path/to/cell_masks.pb \
-  --out ./target/case.cells.overlay \
-  --chunk-size 4096 \
-  --force
-```
-
-Generate a density heatmap from the cell overlay:
-
-```sh
-cargo run -p fovea-pack -- heatmap-overlay \
-  --overlay ./target/case.cells.overlay \
-  --out ./target/case.density.heatmap \
-  --bin-size 128 \
-  --tile-size 256 \
-  --force
-```
-
-### 3. Open the example viewer
+Start the viewer UI:
 
 ```sh
 npm run dev
 ```
 
-Then open:
+Serve a slide directly from a WSI and optional protobuf cell mask file:
 
-```text
-http://127.0.0.1:5173/?bundle=/@fs/absolute/path/case.slide.fovea&overlay=/@fs/absolute/path/case.cells.overlay&heatmap=/@fs/absolute/path/case.density.heatmap
+```sh
+cargo run -p fovea-pack -- serve \
+  --wsi /path/to/slide.svs \
+  --cells-protobuf /path/to/cell_masks.bin \
+  --heatmap \
+  --port 7878
 ```
 
-The example viewer hides its control and performance panels by default. Add `controls=1` and `performance=1` to show them:
+Open the URL printed by `fovea-pack`, for example:
 
 ```text
-http://127.0.0.1:5173/?bundle=...&overlay=...&heatmap=...&controls=1&performance=1
+http://127.0.0.1:5173/?slide=http://127.0.0.1:7878/slide&cells=http://127.0.0.1:7878/cells&heatmap=http://127.0.0.1:7878/heatmap
 ```
+
+The example viewer hides controls and performance metrics by default. Add `controls=1&performance=1` to show them.
 
 ## Documentation
 
-### Minimal Browser Usage
+### Browser Usage
 
 ```ts
 import { FoveaViewer } from "@fovea/viewer";
@@ -81,9 +52,9 @@ if (!canvas) {
 
 const viewer = await FoveaViewer.create({
   canvas,
-  bundleUrl: "/slides/case.slide.fovea",
-  overlayUrl: "/slides/case.cells.overlay",
-  heatmapUrl: "/slides/case.density.heatmap"
+  slideUrl: "http://127.0.0.1:7878/slide",
+  cellsUrl: "http://127.0.0.1:7878/cells",
+  heatmapUrl: "http://127.0.0.1:7878/heatmap"
 });
 
 viewer.start();
@@ -100,9 +71,7 @@ The canvas should have stable CSS dimensions:
 }
 ```
 
-Bundle URLs may point either to a bundle directory or directly to its `manifest.json`.
-
-`@fovea/viewer` does not render built-in UI panels. The top-left loader controls and bottom-right performance panel in `examples/web` are example-app chrome only; production apps decide whether to render any controls around the canvas.
+`@fovea/viewer` renders only into the canvas. It does not create loader controls, status panels, or performance panels; those are example-app UI.
 
 ### Viewer Options
 
@@ -110,29 +79,29 @@ Bundle URLs may point either to a bundle directory or directly to its `manifest.
 interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
   pointCount?: 10_000 | 100_000 | 500_000 | 1_000_000;
-  bundleUrl?: string;
-  overlayUrl?: string;
+  slideUrl?: string;
+  cellsUrl?: string;
   heatmapUrl?: string;
   tileRequestBatchSize?: number;
-  overlayRequestBatchSize?: number;
+  cellsRequestBatchSize?: number;
   heatmapRequestBatchSize?: number;
   maxConcurrentTileRequests?: number;
-  maxConcurrentOverlayRequests?: number;
+  maxConcurrentCellsRequests?: number;
   maxConcurrentHeatmapRequests?: number;
   onStats?: (stats: FrameStats, rolling: RollingFrameStats) => void;
 }
 ```
 
 - `canvas`: Required render target.
-- `pointCount`: Synthetic benchmark point count used when no slide/overlay/heatmap is loaded.
-- `bundleUrl`: `.fovea` slide bundle directory or slide `manifest.json`.
-- `overlayUrl`: `.overlay` cell overlay bundle directory or overlay `manifest.json`.
-- `heatmapUrl`: `.heatmap` bundle directory or heatmap `manifest.json`.
+- `pointCount`: Synthetic benchmark point count used when no slide, cells, or heatmap are loaded.
+- `slideUrl`: Direct server slide endpoint, usually `/slide`.
+- `cellsUrl`: Direct server cell endpoint, usually `/cells`.
+- `heatmapUrl`: Direct server heatmap endpoint, usually `/heatmap`.
 - `tileRequestBatchSize`: Max slide tile requests considered per frame. Default: `96`.
-- `overlayRequestBatchSize`: Max cell chunk requests considered per frame. Default: `64`.
+- `cellsRequestBatchSize`: Max cell chunk requests considered per frame. Default: `64`.
 - `heatmapRequestBatchSize`: Max heatmap tile requests considered per frame. Default: `64`.
 - `maxConcurrentTileRequests`: Parallel slide tile fetches. Default: `8`.
-- `maxConcurrentOverlayRequests`: Parallel cell chunk fetches. Default: `6`.
+- `maxConcurrentCellsRequests`: Parallel cell chunk fetches. Default: `6`.
 - `maxConcurrentHeatmapRequests`: Parallel heatmap tile fetches. Default: `6`.
 - `onStats`: Per-frame metrics callback.
 
@@ -143,9 +112,9 @@ viewer.start();
 viewer.stop();
 viewer.destroy();
 
-await viewer.loadBundle("/path/to/case.slide.fovea");
-await viewer.loadOverlay("/path/to/case.cells.overlay");
-await viewer.loadHeatmap("/path/to/case.density.heatmap");
+await viewer.loadSlide("http://127.0.0.1:7878/slide");
+await viewer.loadCells("http://127.0.0.1:7878/cells");
+await viewer.loadHeatmap("http://127.0.0.1:7878/heatmap");
 
 viewer.resetCamera();
 viewer.panByScreenDelta(20, 0);
@@ -156,8 +125,8 @@ viewer.setLayerVisibility("heatmap", true);
 viewer.setLayerOpacity("cells", 0.75);
 viewer.setLayerOpacity("heatmap", 0.4);
 
-viewer.setOverlayPointSize(3);
-viewer.setOverlayOutlineWidth(1.25);
+viewer.setCellPointSize(3);
+viewer.setCellOutlineWidth(1.25);
 
 viewer.setHeatmapRange("heatmap", { min: 0.05, max: 1 });
 viewer.setHeatmapColormap("heatmap", "magma"); // "magma" | "viridis" | "gray"
@@ -194,45 +163,41 @@ Supported event names:
 - `selection-change`
 - `viewport-change`
 
+### Direct Server
+
+```sh
+cargo run -p fovea-pack -- serve --help
+```
+
+Important options:
+
+- `--wsi`: OpenSlide-readable whole-slide image.
+- `--cells-protobuf`: Optional `new_cell_masks.proto` or legacy `cell_masks.proto` protobuf payload.
+- `--heatmap`: Build an in-memory density heatmap from the cell data.
+- `--host`: HTTP bind host. Default: `127.0.0.1`.
+- `--port`: HTTP bind port. Default: `7878`.
+- `--tile-size`: Served slide tile size. Default: `512`.
+- `--image-format`: Served slide tile format. Default: `webp`.
+- `--chunk-size`: Cell chunk size in level-0 slide pixels. Default: `4096`.
+- `--max-vertices-per-cell`: Polygon vertex cap. Default: `256`.
+- `--heatmap-bin-size`: Level-0 slide pixels per heatmap pixel. Default: `128`.
+- `--heatmap-tile-size`: Heatmap tile edge in heatmap pixels. Default: `256`.
+- `--tile-cache-mb`: RAM cache budget for encoded slide tiles. Default: `1024`.
+
+Cell chunks and heatmap tiles are prepared in memory at startup. Slide tiles are read from OpenSlide on demand, encoded, and cached in RAM.
+
 ### Performance Metrics
 
 ```ts
 const stats = viewer.getPerformanceStats();
 ```
 
-Returns:
+The result includes FPS, p50/p95/p99 frame times, upload time, draw count, visible/loaded slide tiles, visible/loaded heatmap tiles, visible/loaded cell chunks, visible cells, GPU memory, CPU memory estimate, and in-flight request counts.
 
-```ts
-interface PerformanceStats {
-  fps: number;
-  frameTimeP50Ms: number;
-  frameTimeP95Ms: number;
-  frameTimeP99Ms: number;
-  frameTimeMs: number;
-  uploadTimeMs: number;
-  drawCalls: number;
-  visibleTiles: number;
-  loadedTiles: number;
-  visibleHeatmapTiles: number;
-  loadedHeatmapTiles: number;
-  visibleCellChunks: number;
-  loadedCellChunks: number;
-  visibleCells: number;
-  visibleObjects: number;
-  gpuMemoryMb: number;
-  cpuMemoryMbEstimate: number;
-  gpuBufferMemoryBytes: number;
-  cpuMemoryBytes: number;
-  inflightTileRequests: number;
-  inflightOverlayRequests: number;
-  inflightHeatmapRequests: number;
-}
-```
-
-The example UI displays these metrics in the bottom-right panel. A benchmark page is also available:
+Benchmark page:
 
 ```text
-http://127.0.0.1:5173/benchmark.html?bundle=...&overlay=...&heatmap=...
+http://127.0.0.1:5173/benchmark.html?slide=...&cells=...&heatmap=...
 ```
 
 The benchmark writes its latest result to `window.__foveaBenchmark`.
@@ -246,11 +211,10 @@ npm -w fovea-react-example run dev
 Open:
 
 ```text
-http://127.0.0.1:5174/?bundle=...&overlay=...&heatmap=...
+http://127.0.0.1:5174/?slide=...&cells=...&heatmap=...
 ```
 
 ### Requirements
 
 - A browser with WebGPU support.
-- Static hosting that can serve bundle files by URL.
-- Native `fovea-pack` commands require OpenSlide-compatible slide support.
+- Native `fovea-pack` serving requires OpenSlide-compatible slide support.
