@@ -2,6 +2,8 @@ import { FoveaViewer } from "@fovea/viewer";
 import "./styles.css";
 
 const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
+const toolbar = document.querySelector<HTMLElement>(".toolbar");
+const statsPanel = document.querySelector<HTMLElement>(".stats");
 const resetButton = document.querySelector<HTMLButtonElement>("#reset-camera");
 const bundleForm = document.querySelector<HTMLFormElement>("#bundle-form");
 const bundleInput = document.querySelector<HTMLInputElement>("#bundle-url");
@@ -20,6 +22,8 @@ const loadStatus = document.querySelector<HTMLElement>("#load-status");
 
 if (
   !canvas ||
+  !toolbar ||
+  !statsPanel ||
   !resetButton ||
   !bundleForm ||
   !bundleInput ||
@@ -40,6 +44,8 @@ if (
 }
 
 const viewerCanvas = canvas;
+const viewerToolbar = toolbar;
+const viewerStatsPanel = statsPanel;
 const resetCameraButton = resetButton;
 const bundleUrlForm = bundleForm;
 const bundleUrlInput = bundleInput;
@@ -90,9 +96,15 @@ function formatBytes(value: number): string {
 }
 
 async function main(): Promise<void> {
-  const bundleParam = new URLSearchParams(window.location.search).get("bundle");
-  const overlayParam = new URLSearchParams(window.location.search).get("overlay");
-  const heatmapParam = new URLSearchParams(window.location.search).get("heatmap");
+  const params = new URLSearchParams(window.location.search);
+  const bundleParam = params.get("bundle");
+  const overlayParam = params.get("overlay");
+  const heatmapParam = params.get("heatmap");
+  const showControls = queryFlag(params, "controls", false);
+  const showPerformance = queryFlag(params, "performance", false);
+
+  viewerToolbar.hidden = !showControls;
+  viewerStatsPanel.hidden = !showPerformance;
 
   if (bundleParam) {
     bundleUrlInput.value = bundleParam;
@@ -267,6 +279,16 @@ function updateLoadStatus(): void {
   } else {
     bundleLoadStatus.textContent = "Synthetic";
   }
+}
+
+function queryFlag(params: URLSearchParams, name: string, fallback: boolean): boolean {
+  const value = params.get(name);
+
+  if (value == null) {
+    return fallback;
+  }
+
+  return ["1", "true", "yes", "on"].includes(value.toLowerCase());
 }
 
 void main();

@@ -38,6 +38,10 @@ body {
   position: absolute;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .toolbar {
   align-items: center;
   display: flex;
