@@ -1,10 +1,33 @@
 # Fovea
 
-Fovea is a WebGPU whole-slide image viewer for pathology slides and AI-native cell outputs. It serves OpenSlide-readable WSI files and histotyper protobuf cell masks directly, then streams only the visible slide tiles, cell chunks, and heatmap tiles needed for smooth pan/zoom.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
+[![Rust](https://img.shields.io/badge/server-Rust-orange.svg)](https://www.rust-lang.org/)
+[![WebGPU](https://img.shields.io/badge/render-WebGPU-5e35b1.svg)](https://developer.mozilla.org/docs/Web/API/WebGPU_API)
+
+**WebGPU whole-slide viewer for pathology slides and AI-native cell outputs — streamed straight from a WSI and a protobuf, no pre-baked bundle.**
+
+Fovea serves OpenSlide-readable whole-slide images and cell masks **directly**, then streams only the slide tiles, cell chunks, and heatmap tiles the current viewport needs for smooth pan/zoom over gigapixel slides and millions of cells.
 
 The browser package is `@fovea/viewer`. The native data server is `fovea-pack`.
 
-## Get Started
+<!-- 🎬 DEMO: Record a 15-30s GIF panning/zooming a slide with the cell layer and heatmap
+toggled on, ideally showing a cell-click readout. Tools: Kap (macOS), Peek (Linux), or
+vhs/asciinema for the terminal. Save it to assets/demo.gif and uncomment the line below. -->
+<!-- ![Fovea in action](assets/demo.gif) -->
+
+## Why Fovea?
+
+Computational-pathology viewers usually demand a heavyweight conversion step: tile the slide into a DeepZoom/pyramid bundle, rasterize cell overlays, and ship the whole thing to disk before you can look at anything. Fovea skips that. Point it at a `.svs` and an optional cell-mask protobuf and it serves them live — slide tiles are read from OpenSlide on demand and cached in RAM, cells are decoded once into in-memory spatial chunks, and the optional density heatmap is built in memory at startup. The browser only ever fetches what's on screen.
+
+- **Direct serve, zero pre-processing** — no generated bundle on disk; serve a WSI + protobuf and open the viewer.
+- **Gigapixel-ready streaming** — only visible slide tiles, cell chunks, and heatmap tiles are fetched, batched and prioritized per frame.
+- **GPU rendering via WebGPU** — slides, cell polygons/points, and heatmaps composite on the GPU at interactive frame rates.
+- **Optional density heatmap** — `--heatmap` builds an in-memory heatmap from the cells, with configurable colormap, range, and opacity.
+- **Render-only library** — `@fovea/viewer` draws into your canvas and exposes a clean API and events; UI chrome is yours to build.
+
+## Quick Start
+
+**Prerequisites:** a browser with WebGPU support, Node.js, a Rust toolchain, and OpenSlide installed for `fovea-pack`.
 
 Build the workspace:
 
@@ -13,13 +36,7 @@ npm install
 npm run build
 ```
 
-Start the viewer UI:
-
-```sh
-npm run dev
-```
-
-Serve a slide directly from a WSI and optional protobuf cell mask file:
+Serve a slide directly from a WSI and an optional protobuf cell mask file:
 
 ```sh
 cargo run -p fovea-pack -- serve \
@@ -29,10 +46,17 @@ cargo run -p fovea-pack -- serve \
   --port 7878
 ```
 
-Open the URL printed by `fovea-pack`, for example:
+`fovea-pack` prints the address it's serving and a ready-to-open viewer URL:
 
 ```text
-http://127.0.0.1:5173/?slide=http://127.0.0.1:7878/slide&cells=http://127.0.0.1:7878/cells&heatmap=http://127.0.0.1:7878/heatmap
+fovea-pack serve: listening on http://127.0.0.1:7878
+fovea-pack serve: open http://127.0.0.1:5173/?slide=http://127.0.0.1:7878/slide&cells=http://127.0.0.1:7878/cells&heatmap=http://127.0.0.1:7878/heatmap
+```
+
+Start the viewer UI and open that URL:
+
+```sh
+npm run dev
 ```
 
 The example viewer hides controls and performance metrics by default. Add `controls=1&performance=1` to show them.
@@ -165,21 +189,23 @@ Supported event names:
 
 ### Direct Server
 
+`fovea-pack` reads sources directly and exposes three endpoints — `/slide`, `/cells`, and `/heatmap` — each with a `manifest.json` plus on-demand tile/chunk paths. There is no bundle build step.
+
 ```sh
 cargo run -p fovea-pack -- serve --help
 ```
 
 Important options:
 
-- `--wsi`: OpenSlide-readable whole-slide image.
-- `--cells-protobuf`: Optional `new_cell_masks.proto` or legacy `cell_masks.proto` protobuf payload.
-- `--heatmap`: Build an in-memory density heatmap from the cell data.
+- `--wsi`: OpenSlide-readable whole-slide image (e.g. `.svs`, `.ndpi`).
+- `--cells-protobuf`: Optional `histotyper` `SlideSegmentationData` protobuf payload. Current (`histotyper_v2`) and legacy formats are auto-detected.
+- `--heatmap`: Build and serve an in-memory density heatmap from the cell data.
 - `--host`: HTTP bind host. Default: `127.0.0.1`.
 - `--port`: HTTP bind port. Default: `7878`.
 - `--tile-size`: Served slide tile size. Default: `512`.
-- `--image-format`: Served slide tile format. Default: `webp`.
+- `--image-format`: Served slide tile format (`webp` | `jpeg` | `png`). Default: `webp`.
 - `--chunk-size`: Cell chunk size in level-0 slide pixels. Default: `4096`.
-- `--max-vertices-per-cell`: Polygon vertex cap. Default: `256`.
+- `--max-vertices-per-cell`: Polygon vertex cap (`0` for no cap). Default: `256`.
 - `--heatmap-bin-size`: Level-0 slide pixels per heatmap pixel. Default: `128`.
 - `--heatmap-tile-size`: Heatmap tile edge in heatmap pixels. Default: `256`.
 - `--tile-cache-mb`: RAM cache budget for encoded slide tiles. Default: `1024`.
@@ -217,4 +243,17 @@ http://127.0.0.1:5174/?slide=...&cells=...&heatmap=...
 ### Requirements
 
 - A browser with WebGPU support.
-- Native `fovea-pack` serving requires OpenSlide-compatible slide support.
+- Native `fovea-pack` serving requires an OpenSlide-compatible slide and OpenSlide installed on the host.
+
+## Contributing
+
+Issues and pull requests are welcome. The workspace combines a Rust server (`crates/fovea-pack`), a Rust/WASM renderer (`crates/fovea-viewer`), and a TypeScript wrapper (`packages/fovea-js`). Run the test suite with:
+
+```sh
+npm test        # cargo test for fovea-pack and fovea-viewer
+npm run check   # type-check the JS package and examples
+```
+
+## License
+
+Licensed under the [MIT License](LICENSE).
