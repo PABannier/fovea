@@ -40,8 +40,48 @@ pub struct ServeOptions {
     pub tile_cache_mb: usize,
 }
 
+/// Per-slide source description, independent of any HTTP listener. This is the
+/// subset of [`ServeOptions`] needed to prepare one slide's renderable sources,
+/// so an embedding server (for example a multi-slide host) can reuse the
+/// preparation and routing logic without binding its own socket.
+#[derive(Clone, Debug)]
+pub struct SourceOptions {
+    pub wsi_path: PathBuf,
+    pub cells_protobuf_path: Option<PathBuf>,
+    pub tile_size: u32,
+    pub image_format: ImageFormat,
+    pub chunk_size: u32,
+    pub max_vertices_per_cell: u16,
+    pub heatmap: bool,
+    pub heatmap_bin_size: u32,
+    pub heatmap_tile_size: u32,
+    pub tile_cache_mb: usize,
+}
+
+impl ServeOptions {
+    fn source_options(&self) -> SourceOptions {
+        SourceOptions {
+            wsi_path: self.wsi_path.clone(),
+            cells_protobuf_path: self.cells_protobuf_path.clone(),
+            tile_size: self.tile_size,
+            image_format: self.image_format,
+            chunk_size: self.chunk_size,
+            max_vertices_per_cell: self.max_vertices_per_cell,
+            heatmap: self.heatmap,
+            heatmap_bin_size: self.heatmap_bin_size,
+            heatmap_tile_size: self.heatmap_tile_size,
+            tile_cache_mb: self.tile_cache_mb,
+        }
+    }
+}
+
+/// Prepared, in-memory renderable sources for a single slide: the slide reader,
+/// the precomputed slide manifest, the encoded-tile LRU cache, and the optional
+/// cell chunks / density heatmap. Cheap to clone (everything is behind `Arc`).
+/// Build one with [`prepare_sources`] and serve requests against it with
+/// [`route_request`].
 #[derive(Clone)]
-struct AppState {
+pub struct SlideSources {
     reader: Arc<dyn SlideReader>,
     slide_manifest: Arc<Manifest>,
     slide_manifest_json: Arc<String>,
@@ -118,7 +158,12 @@ impl TileCache {
     }
 }
 
-pub async fn serve_sources(options: ServeOptions) -> Result<()> {
+/// Prepare all renderable sources for a single slide: build the slide manifest,
+/// load and chunk the cells, and build the density heatmap. Performs blocking
+/// disk/CPU work (OpenSlide open, protobuf parse, heatmap build) but no network
+/// I/O; callers that care about latency should run it off the request path. The
+/// returned [`SlideSources`] is served by [`route_request`].
+pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
     if !options.wsi_path.exists() {
         return Err(anyhow!(
             "input WSI does not exist: {}",
@@ -127,7 +172,7 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
     }
 
     if options.heatmap && options.cells_protobuf_path.is_none() {
-        return Err(anyhow!("--heatmap requires --cells-protobuf"));
+        return Err(anyhow!("heatmap requires cells_protobuf_path"));
     }
 
     let reader: Arc<dyn SlideReader> = Arc::new(OpenSlideReader::open(&options.wsi_path)?);
@@ -147,7 +192,7 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
             max_vertices_per_cell: options.max_vertices_per_cell,
         })?;
         eprintln!(
-            "fovea-pack serve: prepared {} cell chunks in {:.2}s",
+            "fovea-pack: prepared {} cell chunks in {:.2}s",
             cells.chunks.len(),
             start.elapsed().as_secs_f64()
         );
@@ -170,7 +215,7 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
             },
         )?;
         eprintln!(
-            "fovea-pack serve: prepared {} heatmap tiles in {:.2}s",
+            "fovea-pack: prepared {} heatmap tiles in {:.2}s",
             heatmap.tiles.len(),
             start.elapsed().as_secs_f64()
         );
@@ -179,7 +224,7 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
         None
     };
 
-    let state = AppState {
+    Ok(SlideSources {
         reader,
         slide_manifest,
         slide_manifest_json,
@@ -189,7 +234,11 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
         ))),
         cells,
         heatmap,
-    };
+    })
+}
+
+pub async fn serve_sources(options: ServeOptions) -> Result<()> {
+    let state = prepare_sources(options.source_options()).await?;
     let app = Router::new()
         .fallback(get(handle_get).options(handle_options))
         .with_state(state);
@@ -214,7 +263,7 @@ async fn handle_options() -> Response {
     empty_response(StatusCode::NO_CONTENT)
 }
 
-async fn handle_get(State(state): State<AppState>, uri: Uri) -> Response {
+async fn handle_get(State(state): State<SlideSources>, uri: Uri) -> Response {
     match route_request(&state, uri.path()).await {
         Ok(response) => response,
         Err(error) => {
@@ -224,7 +273,12 @@ async fn handle_get(State(state): State<AppState>, uri: Uri) -> Response {
     }
 }
 
-async fn route_request(state: &AppState, path: &str) -> Result<Response> {
+/// Route one rendering-data request against a prepared [`SlideSources`]. `path`
+/// is the request path relative to the slide root, e.g. `/slide/manifest.json`,
+/// `/slide/images/level_0/0_0.jpg`, `/cells/manifest.json`, `/cells/chunks/0_0.fovc`,
+/// `/heatmap/manifest.json`, or `/heatmap/tiles/0/0_0.fovh`. Returns a ready
+/// axum [`Response`]; an embedding host can forward it verbatim.
+pub async fn route_request(state: &SlideSources, path: &str) -> Result<Response> {
     match path {
         "/slide/manifest.json" => Ok(text_response(
             StatusCode::OK,
@@ -249,7 +303,7 @@ async fn route_request(state: &AppState, path: &str) -> Result<Response> {
     }
 }
 
-async fn serve_slide_tile(state: &AppState, path: &str) -> Result<Response> {
+async fn serve_slide_tile(state: &SlideSources, path: &str) -> Result<Response> {
     let Some((level, x, y)) = parse_slide_tile_path(path, state.image_format) else {
         return Ok(text_response(StatusCode::NOT_FOUND, "tile not found"));
     };
@@ -289,7 +343,7 @@ async fn serve_slide_tile(state: &AppState, path: &str) -> Result<Response> {
     ))
 }
 
-fn serve_cell_chunk(state: &AppState, path: &str) -> Result<Response> {
+fn serve_cell_chunk(state: &SlideSources, path: &str) -> Result<Response> {
     let Some(cells) = &state.cells else {
         return Ok(text_response(StatusCode::NOT_FOUND, "cells not loaded"));
     };
@@ -312,7 +366,7 @@ fn serve_cell_chunk(state: &AppState, path: &str) -> Result<Response> {
     ))
 }
 
-fn serve_heatmap_tile(state: &AppState, path: &str) -> Result<Response> {
+fn serve_heatmap_tile(state: &SlideSources, path: &str) -> Result<Response> {
     let Some(heatmap) = &state.heatmap else {
         return Ok(text_response(StatusCode::NOT_FOUND, "heatmap not loaded"));
     };
