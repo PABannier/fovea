@@ -1,7 +1,4 @@
-import initWasm, {
-  FoveaViewer as WasmFoveaViewer,
-  type FrameStats
-} from "../pkg/fovea_viewer.js";
+import initWasm, { FoveaViewer as WasmFoveaViewer, type FrameStats } from "../pkg/fovea_viewer.js";
 
 export type BenchmarkPointCount = 10_000 | 100_000 | 500_000 | 1_000_000;
 
@@ -275,7 +272,9 @@ export class FoveaViewer {
     const response = await fetch(manifestUrl, { cache: "no-cache" });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch heatmap manifest: ${response.status} ${response.statusText}`);
+      throw new Error(
+        `Failed to fetch heatmap manifest: ${response.status} ${response.statusText}`
+      );
     }
 
     const manifestJson = await response.text();
@@ -449,11 +448,7 @@ export class FoveaViewer {
       (event) => {
         event.preventDefault();
         const point = this.eventCanvasPoint(event);
-        this.wasm.zoomAt(
-          point.x,
-          point.y,
-          event.deltaY
-        );
+        this.wasm.zoomAt(point.x, point.y, event.deltaY);
       },
       { passive: false }
     );
@@ -469,7 +464,10 @@ export class FoveaViewer {
     this.wasm.clickAt(point.x, point.y);
   }
 
-  private eventCanvasPoint(event: Pick<MouseEvent, "clientX" | "clientY">): { x: number; y: number } {
+  private eventCanvasPoint(event: Pick<MouseEvent, "clientX" | "clientY">): {
+    x: number;
+    y: number;
+  } {
     const rect = this.canvas.getBoundingClientRect();
 
     return {

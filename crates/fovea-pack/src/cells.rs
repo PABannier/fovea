@@ -150,7 +150,7 @@ pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<InMemoryCells> {
         }
     };
 
-    Ok(packed.into_memory()?)
+    packed.into_memory()
 }
 
 struct PackedCells {

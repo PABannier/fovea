@@ -745,7 +745,7 @@ struct HeatmapManifest {
 impl HeatmapManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawHeatmapManifest = serde_json::from_str(manifest_json)
-            .map_err(|err| js_error(&format!("failed to parse heatmap manifest: {err}")))?;
+            .map_err(|err| js_error(format!("failed to parse heatmap manifest: {err}")))?;
         let mut tiles = HashMap::new();
 
         for tile in raw.tiles {
@@ -877,7 +877,7 @@ impl HeatmapManifest {
 impl CellOverlayManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawCellOverlayManifest = serde_json::from_str(manifest_json)
-            .map_err(|err| js_error(&format!("failed to parse cell overlay manifest: {err}")))?;
+            .map_err(|err| js_error(format!("failed to parse cell overlay manifest: {err}")))?;
 
         if raw.chunk_width == 0 || raw.chunk_height == 0 {
             return Err(js_error("cell overlay chunk dimensions must be nonzero"));
@@ -987,7 +987,7 @@ struct SlideManifest {
 impl SlideManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawManifest = serde_json::from_str(manifest_json)
-            .map_err(|err| js_error(&format!("failed to parse manifest: {err}")))?;
+            .map_err(|err| js_error(format!("failed to parse manifest: {err}")))?;
         let mut tiles = HashMap::new();
 
         for tile in raw.tiles {
@@ -1204,7 +1204,7 @@ impl Renderer {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|err| js_error(&format!("WebGPU adapter unavailable: {err:?}")))?;
+            .map_err(|err| js_error(format!("WebGPU adapter unavailable: {err:?}")))?;
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -1216,7 +1216,7 @@ impl Renderer {
                 trace: wgpu::Trace::Off,
             })
             .await
-            .map_err(|err| js_error(&format!("failed to request WebGPU device: {err:?}")))?;
+            .map_err(|err| js_error(format!("failed to request WebGPU device: {err:?}")))?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps
@@ -1525,7 +1525,7 @@ impl Renderer {
 
         let expected_len = width as usize * height as usize * 4;
         if rgba.len() != expected_len {
-            return Err(js_error(&format!(
+            return Err(js_error(format!(
                 "tile RGBA byte length mismatch: got {}, expected {expected_len}",
                 rgba.len()
             )));
@@ -1670,7 +1670,7 @@ impl Renderer {
 
         let expected_len = width as usize * height as usize;
         if bytes.len() != expected_len {
-            return Err(js_error(&format!(
+            return Err(js_error(format!(
                 "heatmap tile byte length mismatch: got {}, expected {expected_len}",
                 bytes.len()
             )));
@@ -2274,9 +2274,8 @@ impl Renderer {
     fn update_memory_stats(&mut self, extra_cpu_bytes: usize) {
         let point_bytes = self
             .point_count
-            .checked_mul(std::mem::size_of::<PointVertex>() as u32)
-            .unwrap_or(u32::MAX);
-        let gpu_bytes = std::mem::size_of::<CameraUniform>() as usize
+            .saturating_mul(std::mem::size_of::<PointVertex>() as u32);
+        let gpu_bytes = std::mem::size_of::<CameraUniform>()
             + self.texture_cache.bytes
             + self.heatmap_cache.bytes
             + self.overlay_cache.bytes
@@ -2825,6 +2824,7 @@ impl TextureCache {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_rgba(
         &mut self,
         device: &wgpu::Device,
@@ -2911,6 +2911,7 @@ impl TextureCache {
         self.bytes += bytes;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn insert_r8(
         &mut self,
         device: &wgpu::Device,
@@ -3042,10 +3043,9 @@ fn eviction_score(
     entry: Option<&TextureEntry>,
 ) -> f64 {
     let high_resolution_bias = f64::from(u32::MAX - id.level) * 1_000_000_000.0;
-    let age_bias = entry
+    let age_bias = -entry
         .map(|entry| entry.last_used_frame as f64)
-        .unwrap_or_default()
-        * -1.0;
+        .unwrap_or_default();
     let distance = manifest
         .and_then(|manifest| {
             let level = manifest.level(id.level)?;
@@ -3189,6 +3189,7 @@ fn create_overlay_line_pipeline(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_pipeline(
     device: &wgpu::Device,
     label: &str,
@@ -3236,7 +3237,7 @@ fn create_pipeline(
 }
 
 fn surface_texture_error(err: wgpu::CurrentSurfaceTexture) -> JsValue {
-    js_error(&format!("surface texture error: {err:?}"))
+    js_error(format!("surface texture error: {err:?}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -3386,6 +3387,25 @@ impl OverlayStrokeVertex {
                 },
             ],
         }
+    }
+}
+
+fn overlay_vertex_layout<'a, T>(step_mode: wgpu::VertexStepMode) -> wgpu::VertexBufferLayout<'a> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<T>() as wgpu::BufferAddress,
+        step_mode,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Uint32,
+                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                shader_location: 1,
+            },
+        ],
     }
 }
 
@@ -3652,24 +3672,5 @@ mod tests {
             delta <= tolerance,
             "actual {actual} differs from expected {expected} by {delta}, tolerance {tolerance}"
         );
-    }
-}
-
-fn overlay_vertex_layout<'a, T>(step_mode: wgpu::VertexStepMode) -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<T>() as wgpu::BufferAddress,
-        step_mode,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint32,
-                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                shader_location: 1,
-            },
-        ],
     }
 }

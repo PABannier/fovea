@@ -104,12 +104,30 @@ function summarize(samples: PerformanceStats[]): PerformanceStats {
   const latest = samples[samples.length - 1];
   return {
     ...latest,
-    fps: percentile(samples.map((sample) => sample.fps), 0.5),
-    frameTimeP50Ms: percentile(samples.map((sample) => sample.frameTimeMs), 0.5),
-    frameTimeP95Ms: percentile(samples.map((sample) => sample.frameTimeMs), 0.95),
-    frameTimeP99Ms: percentile(samples.map((sample) => sample.frameTimeMs), 0.99),
-    frameTimeMs: percentile(samples.map((sample) => sample.frameTimeMs), 0.5),
-    uploadTimeMs: percentile(samples.map((sample) => sample.uploadTimeMs), 0.95),
+    fps: percentile(
+      samples.map((sample) => sample.fps),
+      0.5
+    ),
+    frameTimeP50Ms: percentile(
+      samples.map((sample) => sample.frameTimeMs),
+      0.5
+    ),
+    frameTimeP95Ms: percentile(
+      samples.map((sample) => sample.frameTimeMs),
+      0.95
+    ),
+    frameTimeP99Ms: percentile(
+      samples.map((sample) => sample.frameTimeMs),
+      0.99
+    ),
+    frameTimeMs: percentile(
+      samples.map((sample) => sample.frameTimeMs),
+      0.5
+    ),
+    uploadTimeMs: percentile(
+      samples.map((sample) => sample.uploadTimeMs),
+      0.95
+    ),
     drawCalls: Math.max(...samples.map((sample) => sample.drawCalls)),
     visibleTiles: Math.max(...samples.map((sample) => sample.visibleTiles)),
     loadedTiles: Math.max(...samples.map((sample) => sample.loadedTiles)),

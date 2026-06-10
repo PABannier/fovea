@@ -204,6 +204,7 @@ fn downsample_level(previous: &HeatmapLevel) -> HeatmapLevel {
     }
 }
 
+#[allow(clippy::type_complexity)]
 fn build_heatmap_tiles(
     options: &HeatmapBuildOptions,
     levels: &[HeatmapLevel],
