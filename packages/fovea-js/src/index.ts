@@ -343,19 +343,6 @@ export class FoveaViewer {
   }
 
   /**
-   * Restricts which cell classes are rendered and picked. Pass an array of class
-   * ids to show only those classes, or `null` to show every class. Hidden cells
-   * are not drawn and cannot be hovered or clicked.
-   *
-   * This is an ergonomic wrapper over {@link setCellClassVisibility} that pairs
-   * naturally with {@link getCellClasses}: pass back the subset of ids you want
-   * to keep visible.
-   */
-  setVisibleCellClasses(classIds: number[] | null): void {
-    this.wasm.setVisibleCellClasses(JSON.stringify(classIds));
-  }
-
-  /**
    * Set per-class cell colors. `rgba` is a flat array of 4 numbers (r, g, b, a in
    * 0..1) per class, indexed by classId. Up to 64 classes are stored.
    */

@@ -259,19 +259,6 @@ impl FoveaViewer {
         self.renderer.cell_classes_json()
     }
 
-    /// Restricts which cell classes are displayed and picked. `classes_json` is
-    /// either a JSON array of class ids (show only those) or the literal `null`
-    /// (show all classes). Ergonomic, manifest-aligned wrapper over
-    /// [`Self::set_cell_class_visibility`]; both drive the same per-class
-    /// visibility used by the overlay pipelines and picking.
-    #[wasm_bindgen(js_name = setVisibleCellClasses)]
-    pub fn set_visible_cell_classes(&mut self, classes_json: &str) -> Result<(), JsValue> {
-        let ids: Option<Vec<u32>> = serde_json::from_str(classes_json)
-            .map_err(|err| js_error(format!("failed to parse visible cell classes: {err}")))?;
-        self.set_cell_class_visibility(&visible_class_flags(ids.as_deref()));
-        Ok(())
-    }
-
     /// Set per-class cell colors. `rgba` is a flat array of 4 floats (r, g, b, a
     /// in 0..1) per class, indexed by `class_id`; up to 64 classes are stored.
     #[wasm_bindgen(js_name = setCellClassColors)]
@@ -1920,10 +1907,11 @@ impl Renderer {
                 rgba[i * 4 + 3],
             ];
         }
+        // Upload only the colors half of the uniform (offset 0); visibility is untouched.
         self.queue.write_buffer(
             &self.cell_style_buffer,
-            0,
-            bytemuck::bytes_of(&self.cell_style_uniform),
+            std::mem::offset_of!(CellStyleUniform, colors) as wgpu::BufferAddress,
+            bytemuck::bytes_of(&self.cell_style_uniform.colors),
         );
     }
 
@@ -1932,12 +1920,14 @@ impl Renderer {
         for (i, &flag) in flags.iter().enumerate().take(count) {
             let on = flag != 0;
             self.cell_class_visible[i] = on;
-            self.cell_style_uniform.visible[i] = [if on { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+            // Lane 0 is the visibility flag; lanes 1..3 are padding kept at 0.
+            self.cell_style_uniform.visible[i][0] = if on { 1.0 } else { 0.0 };
         }
+        // Upload only the visibility half of the uniform; colors are untouched.
         self.queue.write_buffer(
             &self.cell_style_buffer,
-            0,
-            bytemuck::bytes_of(&self.cell_style_uniform),
+            std::mem::offset_of!(CellStyleUniform, visible) as wgpu::BufferAddress,
+            bytemuck::bytes_of(&self.cell_style_uniform.visible),
         );
     }
 
@@ -3466,24 +3456,6 @@ struct CameraUniform {
 /// hold. Mirrors `array<vec4<f32>, 64>` in `cell_style` (phase0.wgsl).
 const CELL_STYLE_CLASS_CAP: usize = 64;
 
-/// Build a per-class visibility flag array (length [`CELL_STYLE_CLASS_CAP`]) for
-/// the inclusive-set filter API: `None` shows every class, `Some(ids)` shows only
-/// the listed class ids. Ids at or beyond the cap are ignored.
-fn visible_class_flags(ids: Option<&[u32]>) -> Vec<u8> {
-    let mut flags = vec![0u8; CELL_STYLE_CLASS_CAP];
-    match ids {
-        None => flags.iter_mut().for_each(|flag| *flag = 1),
-        Some(ids) => {
-            for &id in ids {
-                if (id as usize) < CELL_STYLE_CLASS_CAP {
-                    flags[id as usize] = 1;
-                }
-            }
-        }
-    }
-    flags
-}
-
 /// Per-class cell styling uploaded to `@group(2)` of the overlay pipelines.
 /// `colors[i].rgb` is class `i`'s color; `visible[i].x >= 0.5` shows class `i`.
 #[repr(C)]
@@ -3836,25 +3808,6 @@ mod tests {
         .expect("manifest parses");
 
         assert_eq!(manifest.classes_json(), "[]");
-    }
-
-    #[test]
-    fn visible_class_flags_maps_inclusive_set() {
-        // `None` shows every class.
-        let all = visible_class_flags(None);
-        assert_eq!(all.len(), CELL_STYLE_CLASS_CAP);
-        assert!(all.iter().all(|&flag| flag == 1));
-
-        // A list shows only the listed ids; out-of-range ids are ignored.
-        let some = visible_class_flags(Some(&[1, 3, CELL_STYLE_CLASS_CAP as u32 + 5]));
-        assert_eq!(some[0], 0);
-        assert_eq!(some[1], 1);
-        assert_eq!(some[2], 0);
-        assert_eq!(some[3], 1);
-        assert!(some[4..].iter().all(|&flag| flag == 0));
-
-        // An empty list hides everything.
-        assert!(visible_class_flags(Some(&[])).iter().all(|&flag| flag == 0));
     }
 
     #[test]

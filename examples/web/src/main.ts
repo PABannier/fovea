@@ -242,22 +242,23 @@ function renderCellClassFilter(viewer: FoveaViewer): void {
   const classes = viewer.getCellClasses();
   cellClassesPanel.replaceChildren();
 
-  // Rebuilt checkboxes default to all-checked; reset the viewer filter to match.
-  viewer.setVisibleCellClasses(null);
-
   if (classes.length === 0) {
     cellClassesPanel.hidden = true;
     return;
   }
 
   const checkboxes: HTMLInputElement[] = [];
+  // Visibility flags are indexed by class id; size to cover every class on the slide.
+  const flagCount = classes.reduce((max, cellClass) => Math.max(max, cellClass.id), 0) + 1;
 
   const applyFilter = (): void => {
-    const checkedIds = checkboxes
-      .filter((checkbox) => checkbox.checked)
-      .map((checkbox) => Number(checkbox.value));
-    // Pass null when every class is visible so the viewer skips filtering.
-    viewer.setVisibleCellClasses(checkedIds.length === classes.length ? null : checkedIds);
+    const flags = new Uint8Array(flagCount);
+    for (const checkbox of checkboxes) {
+      if (checkbox.checked) {
+        flags[Number(checkbox.value)] = 1;
+      }
+    }
+    viewer.setCellClassVisibility(flags);
   };
 
   for (const cellClass of classes) {
@@ -275,6 +276,8 @@ function renderCellClassFilter(viewer: FoveaViewer): void {
     checkboxes.push(checkbox);
   }
 
+  // Rebuilt checkboxes default to all-checked; sync the viewer to match.
+  applyFilter();
   cellClassesPanel.hidden = false;
 }
 
