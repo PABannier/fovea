@@ -251,6 +251,69 @@ impl FoveaViewer {
         self.renderer.write_camera(&self.camera);
     }
 
+    /// Set per-class cell colors. `rgba` is a flat array of 4 floats (r, g, b, a
+    /// in 0..1) per class, indexed by `class_id`; up to 64 classes are stored.
+    #[wasm_bindgen(js_name = setCellClassColors)]
+    pub fn set_cell_class_colors(&mut self, rgba: &[f32]) {
+        self.renderer.set_cell_class_colors(rgba);
+    }
+
+    /// Set per-class cell visibility. `flags[i] != 0` shows class `i`. Hidden
+    /// classes are neither drawn nor hoverable.
+    #[wasm_bindgen(js_name = setCellClassVisibility)]
+    pub fn set_cell_class_visibility(&mut self, flags: &[u8]) {
+        self.renderer.set_cell_class_visibility(flags);
+
+        // Drop a hover that now sits on a hidden class so the host clears its readout.
+        if let Some(class_id) = self.renderer.hovered_class_id() {
+            if !self.renderer.cell_class_visible(class_id) {
+                self.renderer.set_hovered_cell(None);
+                self.events.push(ViewerEvent::CellHover {
+                    cell_id: None,
+                    class_id: None,
+                    slide_x: None,
+                    slide_y: None,
+                });
+            }
+        }
+    }
+
+    /// Current camera as `[centerX, centerY, zoom]` in slide pixels (zoom is
+    /// CSS-px per slide-px). Returned as a `Float64Array`.
+    #[wasm_bindgen(js_name = getCamera)]
+    pub fn get_camera(&self) -> Vec<f64> {
+        vec![self.camera.center_x, self.camera.center_y, self.camera.zoom]
+    }
+
+    /// Set the camera directly (slide-pixel center + CSS-px-per-slide-px zoom),
+    /// clamped to the world. Used to apply a remote/programmatic viewport;
+    /// deliberately does NOT emit a `viewport-changed` event (otherwise a
+    /// follower applying a presenter viewport would rebroadcast and oscillate).
+    #[wasm_bindgen(js_name = setCamera)]
+    pub fn set_camera(&mut self, center_x: f64, center_y: f64, zoom: f64) {
+        self.camera.center_x = center_x;
+        self.camera.center_y = center_y;
+        self.camera.zoom = zoom.clamp(0.00001, 16.0);
+        self.camera.clamp_to_world();
+        self.renderer.write_camera(&self.camera);
+    }
+
+    /// Convert canvas/CSS-pixel coordinates to slide-pixel coordinates,
+    /// returned as a `Float64Array` `[slideX, slideY]`.
+    #[wasm_bindgen(js_name = screenToSlide)]
+    pub fn screen_to_slide(&self, x: f64, y: f64) -> Vec<f64> {
+        let (sx, sy) = self.camera.screen_to_slide(x, y);
+        vec![sx, sy]
+    }
+
+    /// Convert slide-pixel coordinates to canvas/CSS-pixel coordinates,
+    /// returned as a `Float64Array` `[screenX, screenY]`.
+    #[wasm_bindgen(js_name = slideToScreen)]
+    pub fn slide_to_screen(&self, x: f64, y: f64) -> Vec<f64> {
+        let (px, py) = self.camera.slide_to_screen(x, y);
+        vec![px, py]
+    }
+
     #[wasm_bindgen(js_name = setHeatmapVisibility)]
     pub fn set_heatmap_visibility(&mut self, visible: bool) {
         self.renderer.set_heatmap_visibility(visible);
@@ -1129,6 +1192,10 @@ struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    cell_style_buffer: wgpu::Buffer,
+    cell_style_bind_group: wgpu::BindGroup,
+    cell_style_uniform: CellStyleUniform,
+    cell_class_visible: [bool; CELL_STYLE_CLASS_CAP],
     point_buffer: Option<wgpu::Buffer>,
     point_count: u32,
     slide_manifest: Option<SlideManifest>,
@@ -1298,6 +1365,35 @@ impl Renderer {
                 ],
             });
 
+        let cell_style_uniform = CellStyleUniform::default();
+        let cell_style_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fovea-cell-style"),
+            contents: bytemuck::bytes_of(&cell_style_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let cell_style_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fovea-cell-style-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let cell_style_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fovea-cell-style-bind-group"),
+            layout: &cell_style_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cell_style_buffer.as_entire_binding(),
+            }],
+        });
+
         let triangle_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fovea-triangle-pipeline-layout"),
@@ -1321,7 +1417,11 @@ impl Renderer {
         let overlay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fovea-overlay-pipeline-layout"),
-                bind_group_layouts: &[Some(&camera_bind_group_layout)],
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    None,
+                    Some(&cell_style_bind_group_layout),
+                ],
                 immediate_size: 0,
             });
 
@@ -1353,6 +1453,10 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
+            cell_style_buffer,
+            cell_style_bind_group,
+            cell_style_uniform,
+            cell_class_visible: [true; CELL_STYLE_CLASS_CAP],
             point_buffer: None,
             point_count: 0,
             slide_manifest: None,
@@ -1763,6 +1867,44 @@ impl Renderer {
         self.selected_cell = hit;
     }
 
+    fn set_cell_class_colors(&mut self, rgba: &[f32]) {
+        let count = (rgba.len() / 4).min(CELL_STYLE_CLASS_CAP);
+        for i in 0..count {
+            self.cell_style_uniform.colors[i] = [
+                rgba[i * 4],
+                rgba[i * 4 + 1],
+                rgba[i * 4 + 2],
+                rgba[i * 4 + 3],
+            ];
+        }
+        self.queue.write_buffer(
+            &self.cell_style_buffer,
+            0,
+            bytemuck::bytes_of(&self.cell_style_uniform),
+        );
+    }
+
+    fn set_cell_class_visibility(&mut self, flags: &[u8]) {
+        let count = flags.len().min(CELL_STYLE_CLASS_CAP);
+        for (i, &flag) in flags.iter().enumerate().take(count) {
+            let on = flag != 0;
+            self.cell_class_visible[i] = on;
+            self.cell_style_uniform.visible[i] = [if on { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+        }
+        self.queue.write_buffer(
+            &self.cell_style_buffer,
+            0,
+            bytemuck::bytes_of(&self.cell_style_uniform),
+        );
+    }
+
+    fn cell_class_visible(&self, class_id: u32) -> bool {
+        if (class_id as usize) >= CELL_STYLE_CLASS_CAP {
+            return true;
+        }
+        self.cell_class_visible[class_id as usize]
+    }
+
     fn pick_cell(&self, camera: &Camera, screen_x: f64, screen_y: f64) -> Option<CellHit> {
         if !self.overlay_style.visible {
             return None;
@@ -1779,6 +1921,10 @@ impl Renderer {
             };
 
             for cell in &entry.cells {
+                if !self.cell_class_visible(cell.class_id) {
+                    continue;
+                }
+
                 if !cell.bbox_intersects_point(slide.0 as f32, slide.1 as f32, radius_slide as f32)
                 {
                     continue;
@@ -1952,6 +2098,7 @@ impl Renderer {
 
             if !overlay_draw.commands.is_empty() || overlay_highlight_buffer.is_some() {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(2, &self.cell_style_bind_group, &[]);
 
                 if camera.zoom >= POLYGON_OUTLINE_MIN_ZOOM {
                     pass.set_pipeline(&self.overlay_line_pipeline);
@@ -3270,6 +3417,42 @@ struct CameraUniform {
     _pad1: [f32; 2],
     overlay: [f32; 4],
     heatmap: [f32; 4],
+}
+
+/// Maximum number of distinct cell classes the per-class color/visibility LUT can
+/// hold. Mirrors `array<vec4<f32>, 64>` in `cell_style` (phase0.wgsl).
+const CELL_STYLE_CLASS_CAP: usize = 64;
+
+/// Per-class cell styling uploaded to `@group(2)` of the overlay pipelines.
+/// `colors[i].rgb` is class `i`'s color; `visible[i].x >= 0.5` shows class `i`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CellStyleUniform {
+    colors: [[f32; 4]; CELL_STYLE_CLASS_CAP],
+    visible: [[f32; 4]; CELL_STYLE_CLASS_CAP],
+}
+
+impl Default for CellStyleUniform {
+    fn default() -> Self {
+        // Reproduce the legacy `class_id % 6` palette so a host that never calls
+        // set_cell_class_colors renders identically to the previous hardcoded shader.
+        const PALETTE: [[f32; 3]; 6] = [
+            [0.00, 0.78, 0.86],
+            [1.00, 0.55, 0.24],
+            [0.48, 0.82, 0.36],
+            [0.92, 0.38, 0.58],
+            [0.62, 0.55, 0.98],
+            [0.98, 0.82, 0.24],
+        ];
+        let mut colors = [[0.0_f32; 4]; CELL_STYLE_CLASS_CAP];
+        let mut visible = [[0.0_f32; 4]; CELL_STYLE_CLASS_CAP];
+        for i in 0..CELL_STYLE_CLASS_CAP {
+            let base = PALETTE[i % 6];
+            colors[i] = [base[0], base[1], base[2], 1.0];
+            visible[i] = [1.0, 0.0, 0.0, 0.0];
+        }
+        Self { colors, visible }
+    }
 }
 
 #[repr(C)]
