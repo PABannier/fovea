@@ -152,6 +152,11 @@ viewer.setLayerOpacity("heatmap", 0.4);
 viewer.setCellPointSize(3);
 viewer.setCellOutlineWidth(1.25);
 
+// Filter cells by class. Classes come from the cells manifest.
+const classes = viewer.getCellClasses(); // [{ id: 0, name: "tumor" }, ...]
+viewer.setVisibleCellClasses([0, 2]); // show only classes 0 and 2
+viewer.setVisibleCellClasses(null); // show all classes again
+
 viewer.setHeatmapRange("heatmap", { min: 0.05, max: 1 });
 viewer.setHeatmapColormap("heatmap", "magma"); // "magma" | "viridis" | "gray"
 
@@ -190,6 +195,8 @@ Supported event names:
 ### Direct Server
 
 `fovea-pack` reads sources directly and exposes three endpoints — `/slide`, `/cells`, and `/heatmap` — each with a `manifest.json` plus on-demand tile/chunk paths. There is no bundle build step.
+
+The `/cells/manifest.json` includes a `classes` array — `[{ "id": 0, "name": "tumor" }, ...]` — listing every cell class present on the slide, taken from the cell-mask protobuf. The viewer surfaces this via `viewer.getCellClasses()` and filters by class with `viewer.setVisibleCellClasses(...)`.
 
 ```sh
 cargo run -p fovea-pack -- serve --help

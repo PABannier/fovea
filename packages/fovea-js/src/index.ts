@@ -56,6 +56,11 @@ export interface CellEvent {
   slideY: number | null;
 }
 
+export interface CellClass {
+  id: number;
+  name: string;
+}
+
 export interface SelectionChangeEvent {
   count: number;
 }
@@ -322,6 +327,28 @@ export class FoveaViewer {
 
   setCellOutlineWidth(widthPx: number): void {
     this.wasm.setCellOutlineWidth(widthPx);
+  }
+
+  /**
+   * Returns the cell classes present on the loaded slide, as declared in the
+   * cells manifest. Available once `loadCells()` resolves; returns `[]` before
+   * any cells are loaded.
+   */
+  getCellClasses(): CellClass[] {
+    try {
+      return JSON.parse(this.wasm.getCellClasses()) as CellClass[];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Restricts which cell classes are rendered and picked. Pass an array of class
+   * ids to show only those classes, or `null` to show every class. Hidden cells
+   * are not drawn and cannot be hovered or clicked.
+   */
+  setVisibleCellClasses(classIds: number[] | null): void {
+    this.wasm.setVisibleCellClasses(JSON.stringify(classIds));
   }
 
   on<K extends keyof FoveaViewerEvents>(

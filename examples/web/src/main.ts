@@ -13,6 +13,7 @@ const heatmapForm = document.querySelector<HTMLFormElement>("#heatmap-form");
 const heatmapInput = document.querySelector<HTMLInputElement>("#heatmap-url");
 const cellsVisible = document.querySelector<HTMLInputElement>("#cells-visible");
 const cellsOpacity = document.querySelector<HTMLInputElement>("#cells-opacity");
+const cellClasses = document.querySelector<HTMLElement>("#cell-classes");
 const heatmapVisible = document.querySelector<HTMLInputElement>("#heatmap-visible");
 const heatmapOpacity = document.querySelector<HTMLInputElement>("#heatmap-opacity");
 const heatmapMin = document.querySelector<HTMLInputElement>("#heatmap-min");
@@ -33,6 +34,7 @@ if (
   !heatmapInput ||
   !cellsVisible ||
   !cellsOpacity ||
+  !cellClasses ||
   !heatmapVisible ||
   !heatmapOpacity ||
   !heatmapMin ||
@@ -55,6 +57,7 @@ const heatmapUrlForm = heatmapForm;
 const heatmapUrlInput = heatmapInput;
 const cellsVisibleInput = cellsVisible;
 const cellsOpacityInput = cellsOpacity;
+const cellClassesPanel = cellClasses;
 const heatmapVisibleInput = heatmapVisible;
 const heatmapOpacityInput = heatmapOpacity;
 const heatmapMinInput = heatmapMin;
@@ -226,12 +229,53 @@ async function loadCellsFromInput(viewer: FoveaViewer): Promise<void> {
   try {
     await viewer.loadCells(cellsUrl);
     cellsLoaded = true;
+    renderCellClassFilter(viewer);
     updateLoadStatus();
   } catch (error) {
     cellsLoaded = false;
     loadStatusElement.textContent = "Cells failed";
     console.error(error);
   }
+}
+
+function renderCellClassFilter(viewer: FoveaViewer): void {
+  const classes = viewer.getCellClasses();
+  cellClassesPanel.replaceChildren();
+
+  // Rebuilt checkboxes default to all-checked; reset the viewer filter to match.
+  viewer.setVisibleCellClasses(null);
+
+  if (classes.length === 0) {
+    cellClassesPanel.hidden = true;
+    return;
+  }
+
+  const checkboxes: HTMLInputElement[] = [];
+
+  const applyFilter = (): void => {
+    const checkedIds = checkboxes
+      .filter((checkbox) => checkbox.checked)
+      .map((checkbox) => Number(checkbox.value));
+    // Pass null when every class is visible so the viewer skips filtering.
+    viewer.setVisibleCellClasses(checkedIds.length === classes.length ? null : checkedIds);
+  };
+
+  for (const cellClass of classes) {
+    const label = document.createElement("label");
+    label.className = "cell-toggle";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = true;
+    checkbox.value = String(cellClass.id);
+    checkbox.addEventListener("change", applyFilter);
+
+    label.append(checkbox, document.createTextNode(` ${cellClass.name}`));
+    cellClassesPanel.append(label);
+    checkboxes.push(checkbox);
+  }
+
+  cellClassesPanel.hidden = false;
 }
 
 async function loadHeatmapFromInput(viewer: FoveaViewer): Promise<void> {

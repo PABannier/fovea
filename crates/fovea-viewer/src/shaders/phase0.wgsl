@@ -6,6 +6,8 @@ struct Camera {
   _pad1: vec2<f32>,
   overlay: vec4<f32>,
   heatmap: vec4<f32>,
+  // Per-class visibility bitmask (1 = visible), 256 classes across 8 u32 words.
+  class_mask: array<vec4<u32>, 2>,
 };
 
 @group(0) @binding(0)
@@ -174,12 +176,44 @@ fn class_color(class_id: u32) -> vec4<f32> {
   return vec4<f32>(0.98, 0.82, 0.24, 1.0);
 }
 
+fn class_mask_word(index: u32) -> u32 {
+  let vec_index = index / 4u;
+  let component = index % 4u;
+  let words = camera.class_mask[vec_index];
+  if component == 0u {
+    return words.x;
+  }
+  if component == 1u {
+    return words.y;
+  }
+  if component == 2u {
+    return words.z;
+  }
+  return words.w;
+}
+
+fn class_visible(class_id: u32) -> bool {
+  // Hover/selected sentinels and ids beyond the mask are always shown.
+  if class_id >= 256u {
+    return true;
+  }
+  let word = class_mask_word(class_id / 32u);
+  return ((word >> (class_id % 32u)) & 1u) == 1u;
+}
+
 @vertex
 fn vs_overlay_point(
   @builtin(vertex_index) vertex_index: u32,
   @location(0) world_position: vec2<f32>,
   @location(1) class_id: u32
 ) -> VertexOut {
+  if !class_visible(class_id) {
+    var hidden: VertexOut;
+    hidden.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    hidden.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    hidden.uv = vec2<f32>(0.0, 0.0);
+    return hidden;
+  }
   var corners = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0),
     vec2<f32>(1.0, -1.0),
@@ -219,6 +253,13 @@ fn vs_overlay_line(
   @location(3) side: f32,
   @location(4) class_id: u32
 ) -> VertexOut {
+  if !class_visible(class_id) {
+    var hidden: VertexOut;
+    hidden.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+    hidden.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    hidden.uv = vec2<f32>(0.0, 0.0);
+    return hidden;
+  }
   let world_position = segment_start + (segment_end - segment_start) * endpoint;
   let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
   let start_screen = (segment_start - camera.center) * camera.zoom + camera.viewport * 0.5;

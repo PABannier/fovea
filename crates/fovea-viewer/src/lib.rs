@@ -251,6 +251,40 @@ impl FoveaViewer {
         self.renderer.write_camera(&self.camera);
     }
 
+    /// Returns the list of cell classes for the loaded slide as a JSON array of
+    /// `{ "id": number, "name": string }`, sourced from the cells manifest.
+    /// Returns `"[]"` when no cells are loaded.
+    #[wasm_bindgen(js_name = getCellClasses)]
+    pub fn get_cell_classes(&self) -> String {
+        self.renderer.cell_classes_json()
+    }
+
+    /// Restricts which cell classes are displayed and picked. `classes_json` is
+    /// either a JSON array of class ids (show only those) or the literal `null`
+    /// (show all classes).
+    #[wasm_bindgen(js_name = setVisibleCellClasses)]
+    pub fn set_visible_cell_classes(&mut self, classes_json: &str) -> Result<(), JsValue> {
+        let ids: Option<Vec<u32>> = serde_json::from_str(classes_json)
+            .map_err(|err| js_error(format!("failed to parse visible cell classes: {err}")))?;
+        let (hovered_hidden, selected_hidden) =
+            self.renderer.set_overlay_class_filter(ids.as_deref());
+        self.renderer.write_camera(&self.camera);
+
+        if hovered_hidden {
+            self.events.push(ViewerEvent::CellHover {
+                cell_id: None,
+                class_id: None,
+                slide_x: None,
+                slide_y: None,
+            });
+        }
+        if selected_hidden {
+            self.events.push(ViewerEvent::SelectionChange { count: 0 });
+        }
+
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = setHeatmapVisibility)]
     pub fn set_heatmap_visibility(&mut self, visible: bool) {
         self.renderer.set_heatmap_visibility(visible);
@@ -545,6 +579,7 @@ impl Camera {
                 heatmap_style.range_max,
                 heatmap_style.colormap_id,
             ],
+            class_mask: overlay_style.class_mask,
         }
     }
 }
@@ -681,7 +716,16 @@ struct RawCellOverlayManifest {
     height: u32,
     chunk_width: u32,
     chunk_height: u32,
+    #[serde(default)]
+    classes: Vec<CellClassManifest>,
     chunks: Vec<CellChunkManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellClassManifest {
+    id: u16,
+    name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -728,6 +772,7 @@ struct CellOverlayManifest {
     height: f64,
     chunk_width: u32,
     chunk_height: u32,
+    classes: Vec<CellClassManifest>,
     chunks: HashMap<OverlayChunkId, CellChunkManifest>,
 }
 
@@ -901,12 +946,17 @@ impl CellOverlayManifest {
             height: raw.height as f64,
             chunk_width: raw.chunk_width,
             chunk_height: raw.chunk_height,
+            classes: raw.classes,
             chunks,
         })
     }
 
     fn dimensions(&self) -> (f64, f64) {
         (self.width, self.height)
+    }
+
+    fn classes_json(&self) -> String {
+        serde_json::to_string(&self.classes).unwrap_or_else(|_| "[]".to_string())
     }
 
     fn visible_chunks(&self, camera: &Camera) -> Vec<VisibleOverlayChunk> {
@@ -1147,12 +1197,51 @@ struct Renderer {
     cpu_memory_bytes: u32,
 }
 
+/// Number of cell classes that can be individually toggled by the class filter.
+/// Class ids at or above this cap are always shown (pathology slides carry far
+/// fewer classes than this in practice).
+const OVERLAY_CLASS_MASK_BITS: u32 = 256;
+const OVERLAY_CLASS_MASK_WORDS: usize = (OVERLAY_CLASS_MASK_BITS / 32) as usize;
+
 #[derive(Clone, Copy)]
 struct OverlayStyle {
     visible: bool,
     opacity: f32,
     point_size_px: f32,
     outline_width_px: f32,
+    /// Per-class visibility bitmask, 1 = visible. Bit `i` controls class id `i`.
+    class_mask: [u32; OVERLAY_CLASS_MASK_WORDS],
+}
+
+impl OverlayStyle {
+    /// Set the per-class visibility mask. `None` shows every class; `Some(ids)`
+    /// shows only the listed class ids. Ids at or above [`OVERLAY_CLASS_MASK_BITS`]
+    /// are ignored here and always shown by [`OverlayStyle::class_visible`].
+    fn set_class_filter(&mut self, visible_ids: Option<&[u32]>) {
+        match visible_ids {
+            None => self.class_mask = [u32::MAX; OVERLAY_CLASS_MASK_WORDS],
+            Some(ids) => {
+                let mut mask = [0u32; OVERLAY_CLASS_MASK_WORDS];
+                for &id in ids {
+                    if id < OVERLAY_CLASS_MASK_BITS {
+                        mask[(id / 32) as usize] |= 1 << (id % 32);
+                    }
+                }
+                self.class_mask = mask;
+            }
+        }
+    }
+
+    /// Whether a cell of `class_id` should be drawn/picked under the current filter.
+    /// Hover/selected sentinel ids and ids beyond the mask are always visible.
+    fn class_visible(&self, class_id: u32) -> bool {
+        if class_id >= OVERLAY_CLASS_MASK_BITS {
+            return true;
+        }
+        let word = (class_id / 32) as usize;
+        let bit = class_id % 32;
+        (self.class_mask[word] >> bit) & 1 == 1
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1183,6 +1272,7 @@ impl Default for OverlayStyle {
             opacity: 0.78,
             point_size_px: 3.0,
             outline_width_px: 1.25,
+            class_mask: [u32::MAX; OVERLAY_CLASS_MASK_WORDS],
         }
     }
 }
@@ -1406,6 +1496,13 @@ impl Renderer {
         self.overlay_cache.clear();
         self.cell_overlay_manifest = Some(manifest);
         self.last_upload_time_ms = 0.0;
+    }
+
+    fn cell_classes_json(&self) -> String {
+        self.cell_overlay_manifest
+            .as_ref()
+            .map(CellOverlayManifest::classes_json)
+            .unwrap_or_else(|| "[]".to_string())
     }
 
     fn set_heatmap_manifest(&mut self, manifest: HeatmapManifest) {
@@ -1712,6 +1809,33 @@ impl Renderer {
         self.overlay_style.outline_width_px = (width_px as f32).clamp(0.25, 6.0);
     }
 
+    /// Restrict which cell classes are drawn and picked. `None` shows every
+    /// class; `Some(ids)` shows only the listed class ids. Class ids at or above
+    /// [`OVERLAY_CLASS_MASK_BITS`] are always shown. Returns `(hovered_hidden,
+    /// selected_hidden)` indicating whether the new filter cleared the hovered
+    /// or selected cell respectively.
+    fn set_overlay_class_filter(&mut self, visible_ids: Option<&[u32]>) -> (bool, bool) {
+        self.overlay_style.set_class_filter(visible_ids);
+
+        let hovered_hidden = self
+            .hovered_cell
+            .as_ref()
+            .is_some_and(|cell| !self.overlay_style.class_visible(cell.class_id));
+        let selected_hidden = self
+            .selected_cell
+            .as_ref()
+            .is_some_and(|cell| !self.overlay_style.class_visible(cell.class_id));
+
+        if hovered_hidden {
+            self.hovered_cell = None;
+        }
+        if selected_hidden {
+            self.selected_cell = None;
+        }
+
+        (hovered_hidden, selected_hidden)
+    }
+
     fn set_heatmap_visibility(&mut self, visible: bool) {
         self.heatmap_style.visible = visible;
     }
@@ -1779,6 +1903,10 @@ impl Renderer {
             };
 
             for cell in &entry.cells {
+                if !self.overlay_style.class_visible(cell.class_id) {
+                    continue;
+                }
+
                 if !cell.bbox_intersects_point(slide.0 as f32, slide.1 as f32, radius_slide as f32)
                 {
                     continue;
@@ -3270,6 +3398,7 @@ struct CameraUniform {
     _pad1: [f32; 2],
     overlay: [f32; 4],
     heatmap: [f32; 4],
+    class_mask: [u32; OVERLAY_CLASS_MASK_WORDS],
 }
 
 #[repr(C)]
@@ -3549,6 +3678,70 @@ mod tests {
         }"#;
 
         assert!(CellOverlayManifest::from_json(manifest).is_err());
+    }
+
+    #[test]
+    fn cell_overlay_manifest_exposes_classes() {
+        let manifest = CellOverlayManifest::from_json(
+            r#"{
+                "id": "cells",
+                "width": 1024,
+                "height": 768,
+                "chunkWidth": 256,
+                "chunkHeight": 256,
+                "classes": [
+                    {"id": 0, "name": "tumor"},
+                    {"id": 1, "name": "lymphocyte"}
+                ],
+                "chunks": []
+            }"#,
+        )
+        .expect("manifest parses");
+
+        let classes: Vec<CellClassManifest> =
+            serde_json::from_str(&manifest.classes_json()).expect("classes json parses");
+        assert_eq!(classes.len(), 2);
+        assert_eq!(classes[0].id, 0);
+        assert_eq!(classes[0].name, "tumor");
+        assert_eq!(classes[1].name, "lymphocyte");
+    }
+
+    #[test]
+    fn cell_overlay_manifest_defaults_classes_to_empty() {
+        let manifest = CellOverlayManifest::from_json(
+            r#"{
+                "id": "cells",
+                "width": 1024,
+                "height": 768,
+                "chunkWidth": 256,
+                "chunkHeight": 256,
+                "chunks": []
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.classes_json(), "[]");
+    }
+
+    #[test]
+    fn overlay_class_filter_controls_visibility() {
+        let mut style = OverlayStyle::default();
+        // Default shows everything.
+        assert!(style.class_visible(0));
+        assert!(style.class_visible(5));
+
+        style.set_class_filter(Some(&[1]));
+        assert!(!style.class_visible(0));
+        assert!(style.class_visible(1));
+        assert!(!style.class_visible(2));
+        // Ids beyond the mask (and hover/selected sentinels) stay visible.
+        assert!(style.class_visible(OVERLAY_CLASS_MASK_BITS));
+        assert!(style.class_visible(OVERLAY_HOVER_CLASS_ID));
+        assert!(style.class_visible(OVERLAY_SELECTED_CLASS_ID));
+
+        style.set_class_filter(None);
+        assert!(style.class_visible(0));
+        assert!(style.class_visible(2));
     }
 
     #[test]
