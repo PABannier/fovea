@@ -56,6 +56,11 @@ export interface CellEvent {
   slideY: number | null;
 }
 
+export interface CellClass {
+  id: number;
+  name: string;
+}
+
 export interface SelectionChangeEvent {
   count: number;
 }
@@ -322,6 +327,19 @@ export class FoveaViewer {
 
   setCellOutlineWidth(widthPx: number): void {
     this.wasm.setCellOutlineWidth(widthPx);
+  }
+
+  /**
+   * Returns the cell classes present on the loaded slide, as declared in the
+   * cells manifest. Available once `loadCells()` resolves; returns `[]` before
+   * any cells are loaded.
+   */
+  getCellClasses(): CellClass[] {
+    try {
+      return JSON.parse(this.wasm.getCellClasses()) as CellClass[];
+    } catch {
+      return [];
+    }
   }
 
   /**

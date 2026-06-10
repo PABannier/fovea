@@ -251,6 +251,14 @@ impl FoveaViewer {
         self.renderer.write_camera(&self.camera);
     }
 
+    /// Returns the list of cell classes for the loaded slide as a JSON array of
+    /// `{ "id": number, "name": string }`, sourced from the cells manifest.
+    /// Returns `"[]"` when no cells are loaded.
+    #[wasm_bindgen(js_name = getCellClasses)]
+    pub fn get_cell_classes(&self) -> String {
+        self.renderer.cell_classes_json()
+    }
+
     /// Set per-class cell colors. `rgba` is a flat array of 4 floats (r, g, b, a
     /// in 0..1) per class, indexed by `class_id`; up to 64 classes are stored.
     #[wasm_bindgen(js_name = setCellClassColors)]
@@ -744,7 +752,16 @@ struct RawCellOverlayManifest {
     height: u32,
     chunk_width: u32,
     chunk_height: u32,
+    #[serde(default)]
+    classes: Vec<CellClassManifest>,
     chunks: Vec<CellChunkManifest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CellClassManifest {
+    id: u16,
+    name: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -791,6 +808,7 @@ struct CellOverlayManifest {
     height: f64,
     chunk_width: u32,
     chunk_height: u32,
+    classes: Vec<CellClassManifest>,
     chunks: HashMap<OverlayChunkId, CellChunkManifest>,
 }
 
@@ -964,12 +982,17 @@ impl CellOverlayManifest {
             height: raw.height as f64,
             chunk_width: raw.chunk_width,
             chunk_height: raw.chunk_height,
+            classes: raw.classes,
             chunks,
         })
     }
 
     fn dimensions(&self) -> (f64, f64) {
         (self.width, self.height)
+    }
+
+    fn classes_json(&self) -> String {
+        serde_json::to_string(&self.classes).unwrap_or_else(|_| "[]".to_string())
     }
 
     fn visible_chunks(&self, camera: &Camera) -> Vec<VisibleOverlayChunk> {
@@ -1512,6 +1535,13 @@ impl Renderer {
         self.last_upload_time_ms = 0.0;
     }
 
+    fn cell_classes_json(&self) -> String {
+        self.cell_overlay_manifest
+            .as_ref()
+            .map(CellOverlayManifest::classes_json)
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
     fn set_heatmap_manifest(&mut self, manifest: HeatmapManifest) {
         self.heatmap_cache.clear();
         self.heatmap_manifest = Some(manifest);
@@ -1877,10 +1907,11 @@ impl Renderer {
                 rgba[i * 4 + 3],
             ];
         }
+        // Upload only the colors half of the uniform (offset 0); visibility is untouched.
         self.queue.write_buffer(
             &self.cell_style_buffer,
-            0,
-            bytemuck::bytes_of(&self.cell_style_uniform),
+            std::mem::offset_of!(CellStyleUniform, colors) as wgpu::BufferAddress,
+            bytemuck::bytes_of(&self.cell_style_uniform.colors),
         );
     }
 
@@ -1889,12 +1920,14 @@ impl Renderer {
         for (i, &flag) in flags.iter().enumerate().take(count) {
             let on = flag != 0;
             self.cell_class_visible[i] = on;
-            self.cell_style_uniform.visible[i] = [if on { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+            // Lane 0 is the visibility flag; lanes 1..3 are padding kept at 0.
+            self.cell_style_uniform.visible[i][0] = if on { 1.0 } else { 0.0 };
         }
+        // Upload only the visibility half of the uniform; colors are untouched.
         self.queue.write_buffer(
             &self.cell_style_buffer,
-            0,
-            bytemuck::bytes_of(&self.cell_style_uniform),
+            std::mem::offset_of!(CellStyleUniform, visible) as wgpu::BufferAddress,
+            bytemuck::bytes_of(&self.cell_style_uniform.visible),
         );
     }
 
@@ -3732,6 +3765,49 @@ mod tests {
         }"#;
 
         assert!(CellOverlayManifest::from_json(manifest).is_err());
+    }
+
+    #[test]
+    fn cell_overlay_manifest_exposes_classes() {
+        let manifest = CellOverlayManifest::from_json(
+            r#"{
+                "id": "cells",
+                "width": 1024,
+                "height": 768,
+                "chunkWidth": 256,
+                "chunkHeight": 256,
+                "classes": [
+                    {"id": 0, "name": "tumor"},
+                    {"id": 1, "name": "lymphocyte"}
+                ],
+                "chunks": []
+            }"#,
+        )
+        .expect("manifest parses");
+
+        let classes: Vec<CellClassManifest> =
+            serde_json::from_str(&manifest.classes_json()).expect("classes json parses");
+        assert_eq!(classes.len(), 2);
+        assert_eq!(classes[0].id, 0);
+        assert_eq!(classes[0].name, "tumor");
+        assert_eq!(classes[1].name, "lymphocyte");
+    }
+
+    #[test]
+    fn cell_overlay_manifest_defaults_classes_to_empty() {
+        let manifest = CellOverlayManifest::from_json(
+            r#"{
+                "id": "cells",
+                "width": 1024,
+                "height": 768,
+                "chunkWidth": 256,
+                "chunkHeight": 256,
+                "chunks": []
+            }"#,
+        )
+        .expect("manifest parses");
+
+        assert_eq!(manifest.classes_json(), "[]");
     }
 
     #[test]
