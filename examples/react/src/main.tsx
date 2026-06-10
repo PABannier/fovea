@@ -38,7 +38,11 @@ function App(): React.ReactElement {
       viewerRef.current = viewer;
       viewer.start();
       setStatus(
-        [params.get("slide") && "Slide", params.get("cells") && "Cells", params.get("heatmap") && "Heatmap"]
+        [
+          params.get("slide") && "Slide",
+          params.get("cells") && "Cells",
+          params.get("heatmap") && "Heatmap"
+        ]
           .filter(Boolean)
           .join(" + ") || "Synthetic"
       );

@@ -12,6 +12,11 @@
     "build": "npm run build:wasm && npm -w @fovea/viewer run build && npm -w fovea-web-example run build && npm -w fovea-react-example run build",
     "dev": "npm run build:wasm && npm -w fovea-web-example run dev",
     "check": "npm run build:wasm && npm -w @fovea/viewer run check && npm -w @fovea/viewer run build && npm -w fovea-web-example run check && npm -w fovea-react-example run check",
-    "test": "cargo test -p fovea-pack && cargo test -p fovea-viewer --lib"
+    "test": "cargo test -p fovea-pack && cargo test -p fovea-viewer --lib",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2"
   }
 }

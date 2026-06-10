@@ -70,14 +70,7 @@ if (
 const outDir = resolve(root, "packages/fovea-js/pkg");
 mkdirSync(outDir, { recursive: true });
 
-run("cargo", [
-  "build",
-  "--release",
-  "--target",
-  wasmTarget,
-  "-p",
-  "fovea-viewer"
-]);
+run("cargo", ["build", "--release", "--target", wasmTarget, "-p", "fovea-viewer"]);
 
 const wasmPath = resolve(root, "target/wasm32-unknown-unknown/release/fovea_viewer.wasm");
 
