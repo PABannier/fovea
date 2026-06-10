@@ -261,28 +261,78 @@ impl FoveaViewer {
 
     /// Restricts which cell classes are displayed and picked. `classes_json` is
     /// either a JSON array of class ids (show only those) or the literal `null`
-    /// (show all classes).
+    /// (show all classes). Ergonomic, manifest-aligned wrapper over
+    /// [`Self::set_cell_class_visibility`]; both drive the same per-class
+    /// visibility used by the overlay pipelines and picking.
     #[wasm_bindgen(js_name = setVisibleCellClasses)]
     pub fn set_visible_cell_classes(&mut self, classes_json: &str) -> Result<(), JsValue> {
         let ids: Option<Vec<u32>> = serde_json::from_str(classes_json)
             .map_err(|err| js_error(format!("failed to parse visible cell classes: {err}")))?;
-        let (hovered_hidden, selected_hidden) =
-            self.renderer.set_overlay_class_filter(ids.as_deref());
-        self.renderer.write_camera(&self.camera);
-
-        if hovered_hidden {
-            self.events.push(ViewerEvent::CellHover {
-                cell_id: None,
-                class_id: None,
-                slide_x: None,
-                slide_y: None,
-            });
-        }
-        if selected_hidden {
-            self.events.push(ViewerEvent::SelectionChange { count: 0 });
-        }
-
+        self.set_cell_class_visibility(&visible_class_flags(ids.as_deref()));
         Ok(())
+    }
+
+    /// Set per-class cell colors. `rgba` is a flat array of 4 floats (r, g, b, a
+    /// in 0..1) per class, indexed by `class_id`; up to 64 classes are stored.
+    #[wasm_bindgen(js_name = setCellClassColors)]
+    pub fn set_cell_class_colors(&mut self, rgba: &[f32]) {
+        self.renderer.set_cell_class_colors(rgba);
+    }
+
+    /// Set per-class cell visibility. `flags[i] != 0` shows class `i`. Hidden
+    /// classes are neither drawn nor hoverable.
+    #[wasm_bindgen(js_name = setCellClassVisibility)]
+    pub fn set_cell_class_visibility(&mut self, flags: &[u8]) {
+        self.renderer.set_cell_class_visibility(flags);
+
+        // Drop a hover that now sits on a hidden class so the host clears its readout.
+        if let Some(class_id) = self.renderer.hovered_class_id() {
+            if !self.renderer.cell_class_visible(class_id) {
+                self.renderer.set_hovered_cell(None);
+                self.events.push(ViewerEvent::CellHover {
+                    cell_id: None,
+                    class_id: None,
+                    slide_x: None,
+                    slide_y: None,
+                });
+            }
+        }
+    }
+
+    /// Current camera as `[centerX, centerY, zoom]` in slide pixels (zoom is
+    /// CSS-px per slide-px). Returned as a `Float64Array`.
+    #[wasm_bindgen(js_name = getCamera)]
+    pub fn get_camera(&self) -> Vec<f64> {
+        vec![self.camera.center_x, self.camera.center_y, self.camera.zoom]
+    }
+
+    /// Set the camera directly (slide-pixel center + CSS-px-per-slide-px zoom),
+    /// clamped to the world. Used to apply a remote/programmatic viewport;
+    /// deliberately does NOT emit a `viewport-changed` event (otherwise a
+    /// follower applying a presenter viewport would rebroadcast and oscillate).
+    #[wasm_bindgen(js_name = setCamera)]
+    pub fn set_camera(&mut self, center_x: f64, center_y: f64, zoom: f64) {
+        self.camera.center_x = center_x;
+        self.camera.center_y = center_y;
+        self.camera.zoom = zoom.clamp(0.00001, 16.0);
+        self.camera.clamp_to_world();
+        self.renderer.write_camera(&self.camera);
+    }
+
+    /// Convert canvas/CSS-pixel coordinates to slide-pixel coordinates,
+    /// returned as a `Float64Array` `[slideX, slideY]`.
+    #[wasm_bindgen(js_name = screenToSlide)]
+    pub fn screen_to_slide(&self, x: f64, y: f64) -> Vec<f64> {
+        let (sx, sy) = self.camera.screen_to_slide(x, y);
+        vec![sx, sy]
+    }
+
+    /// Convert slide-pixel coordinates to canvas/CSS-pixel coordinates,
+    /// returned as a `Float64Array` `[screenX, screenY]`.
+    #[wasm_bindgen(js_name = slideToScreen)]
+    pub fn slide_to_screen(&self, x: f64, y: f64) -> Vec<f64> {
+        let (px, py) = self.camera.slide_to_screen(x, y);
+        vec![px, py]
     }
 
     #[wasm_bindgen(js_name = setHeatmapVisibility)]
@@ -579,7 +629,6 @@ impl Camera {
                 heatmap_style.range_max,
                 heatmap_style.colormap_id,
             ],
-            class_mask: overlay_style.class_mask,
         }
     }
 }
@@ -1179,6 +1228,10 @@ struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    cell_style_buffer: wgpu::Buffer,
+    cell_style_bind_group: wgpu::BindGroup,
+    cell_style_uniform: CellStyleUniform,
+    cell_class_visible: [bool; CELL_STYLE_CLASS_CAP],
     point_buffer: Option<wgpu::Buffer>,
     point_count: u32,
     slide_manifest: Option<SlideManifest>,
@@ -1197,51 +1250,12 @@ struct Renderer {
     cpu_memory_bytes: u32,
 }
 
-/// Number of cell classes that can be individually toggled by the class filter.
-/// Class ids at or above this cap are always shown (pathology slides carry far
-/// fewer classes than this in practice).
-const OVERLAY_CLASS_MASK_BITS: u32 = 256;
-const OVERLAY_CLASS_MASK_WORDS: usize = (OVERLAY_CLASS_MASK_BITS / 32) as usize;
-
 #[derive(Clone, Copy)]
 struct OverlayStyle {
     visible: bool,
     opacity: f32,
     point_size_px: f32,
     outline_width_px: f32,
-    /// Per-class visibility bitmask, 1 = visible. Bit `i` controls class id `i`.
-    class_mask: [u32; OVERLAY_CLASS_MASK_WORDS],
-}
-
-impl OverlayStyle {
-    /// Set the per-class visibility mask. `None` shows every class; `Some(ids)`
-    /// shows only the listed class ids. Ids at or above [`OVERLAY_CLASS_MASK_BITS`]
-    /// are ignored here and always shown by [`OverlayStyle::class_visible`].
-    fn set_class_filter(&mut self, visible_ids: Option<&[u32]>) {
-        match visible_ids {
-            None => self.class_mask = [u32::MAX; OVERLAY_CLASS_MASK_WORDS],
-            Some(ids) => {
-                let mut mask = [0u32; OVERLAY_CLASS_MASK_WORDS];
-                for &id in ids {
-                    if id < OVERLAY_CLASS_MASK_BITS {
-                        mask[(id / 32) as usize] |= 1 << (id % 32);
-                    }
-                }
-                self.class_mask = mask;
-            }
-        }
-    }
-
-    /// Whether a cell of `class_id` should be drawn/picked under the current filter.
-    /// Hover/selected sentinel ids and ids beyond the mask are always visible.
-    fn class_visible(&self, class_id: u32) -> bool {
-        if class_id >= OVERLAY_CLASS_MASK_BITS {
-            return true;
-        }
-        let word = (class_id / 32) as usize;
-        let bit = class_id % 32;
-        (self.class_mask[word] >> bit) & 1 == 1
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -1272,7 +1286,6 @@ impl Default for OverlayStyle {
             opacity: 0.78,
             point_size_px: 3.0,
             outline_width_px: 1.25,
-            class_mask: [u32::MAX; OVERLAY_CLASS_MASK_WORDS],
         }
     }
 }
@@ -1388,6 +1401,35 @@ impl Renderer {
                 ],
             });
 
+        let cell_style_uniform = CellStyleUniform::default();
+        let cell_style_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("fovea-cell-style"),
+            contents: bytemuck::bytes_of(&cell_style_uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let cell_style_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("fovea-cell-style-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let cell_style_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("fovea-cell-style-bind-group"),
+            layout: &cell_style_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: cell_style_buffer.as_entire_binding(),
+            }],
+        });
+
         let triangle_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fovea-triangle-pipeline-layout"),
@@ -1411,7 +1453,11 @@ impl Renderer {
         let overlay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fovea-overlay-pipeline-layout"),
-                bind_group_layouts: &[Some(&camera_bind_group_layout)],
+                bind_group_layouts: &[
+                    Some(&camera_bind_group_layout),
+                    None,
+                    Some(&cell_style_bind_group_layout),
+                ],
                 immediate_size: 0,
             });
 
@@ -1443,6 +1489,10 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
+            cell_style_buffer,
+            cell_style_bind_group,
+            cell_style_uniform,
+            cell_class_visible: [true; CELL_STYLE_CLASS_CAP],
             point_buffer: None,
             point_count: 0,
             slide_manifest: None,
@@ -1809,33 +1859,6 @@ impl Renderer {
         self.overlay_style.outline_width_px = (width_px as f32).clamp(0.25, 6.0);
     }
 
-    /// Restrict which cell classes are drawn and picked. `None` shows every
-    /// class; `Some(ids)` shows only the listed class ids. Class ids at or above
-    /// [`OVERLAY_CLASS_MASK_BITS`] are always shown. Returns `(hovered_hidden,
-    /// selected_hidden)` indicating whether the new filter cleared the hovered
-    /// or selected cell respectively.
-    fn set_overlay_class_filter(&mut self, visible_ids: Option<&[u32]>) -> (bool, bool) {
-        self.overlay_style.set_class_filter(visible_ids);
-
-        let hovered_hidden = self
-            .hovered_cell
-            .as_ref()
-            .is_some_and(|cell| !self.overlay_style.class_visible(cell.class_id));
-        let selected_hidden = self
-            .selected_cell
-            .as_ref()
-            .is_some_and(|cell| !self.overlay_style.class_visible(cell.class_id));
-
-        if hovered_hidden {
-            self.hovered_cell = None;
-        }
-        if selected_hidden {
-            self.selected_cell = None;
-        }
-
-        (hovered_hidden, selected_hidden)
-    }
-
     fn set_heatmap_visibility(&mut self, visible: bool) {
         self.heatmap_style.visible = visible;
     }
@@ -1887,6 +1910,44 @@ impl Renderer {
         self.selected_cell = hit;
     }
 
+    fn set_cell_class_colors(&mut self, rgba: &[f32]) {
+        let count = (rgba.len() / 4).min(CELL_STYLE_CLASS_CAP);
+        for i in 0..count {
+            self.cell_style_uniform.colors[i] = [
+                rgba[i * 4],
+                rgba[i * 4 + 1],
+                rgba[i * 4 + 2],
+                rgba[i * 4 + 3],
+            ];
+        }
+        self.queue.write_buffer(
+            &self.cell_style_buffer,
+            0,
+            bytemuck::bytes_of(&self.cell_style_uniform),
+        );
+    }
+
+    fn set_cell_class_visibility(&mut self, flags: &[u8]) {
+        let count = flags.len().min(CELL_STYLE_CLASS_CAP);
+        for (i, &flag) in flags.iter().enumerate().take(count) {
+            let on = flag != 0;
+            self.cell_class_visible[i] = on;
+            self.cell_style_uniform.visible[i] = [if on { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+        }
+        self.queue.write_buffer(
+            &self.cell_style_buffer,
+            0,
+            bytemuck::bytes_of(&self.cell_style_uniform),
+        );
+    }
+
+    fn cell_class_visible(&self, class_id: u32) -> bool {
+        if (class_id as usize) >= CELL_STYLE_CLASS_CAP {
+            return true;
+        }
+        self.cell_class_visible[class_id as usize]
+    }
+
     fn pick_cell(&self, camera: &Camera, screen_x: f64, screen_y: f64) -> Option<CellHit> {
         if !self.overlay_style.visible {
             return None;
@@ -1903,7 +1964,7 @@ impl Renderer {
             };
 
             for cell in &entry.cells {
-                if !self.overlay_style.class_visible(cell.class_id) {
+                if !self.cell_class_visible(cell.class_id) {
                     continue;
                 }
 
@@ -2080,6 +2141,7 @@ impl Renderer {
 
             if !overlay_draw.commands.is_empty() || overlay_highlight_buffer.is_some() {
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
+                pass.set_bind_group(2, &self.cell_style_bind_group, &[]);
 
                 if camera.zoom >= POLYGON_OUTLINE_MIN_ZOOM {
                     pass.set_pipeline(&self.overlay_line_pipeline);
@@ -3398,7 +3460,60 @@ struct CameraUniform {
     _pad1: [f32; 2],
     overlay: [f32; 4],
     heatmap: [f32; 4],
-    class_mask: [u32; OVERLAY_CLASS_MASK_WORDS],
+}
+
+/// Maximum number of distinct cell classes the per-class color/visibility LUT can
+/// hold. Mirrors `array<vec4<f32>, 64>` in `cell_style` (phase0.wgsl).
+const CELL_STYLE_CLASS_CAP: usize = 64;
+
+/// Build a per-class visibility flag array (length [`CELL_STYLE_CLASS_CAP`]) for
+/// the inclusive-set filter API: `None` shows every class, `Some(ids)` shows only
+/// the listed class ids. Ids at or beyond the cap are ignored.
+fn visible_class_flags(ids: Option<&[u32]>) -> Vec<u8> {
+    let mut flags = vec![0u8; CELL_STYLE_CLASS_CAP];
+    match ids {
+        None => flags.iter_mut().for_each(|flag| *flag = 1),
+        Some(ids) => {
+            for &id in ids {
+                if (id as usize) < CELL_STYLE_CLASS_CAP {
+                    flags[id as usize] = 1;
+                }
+            }
+        }
+    }
+    flags
+}
+
+/// Per-class cell styling uploaded to `@group(2)` of the overlay pipelines.
+/// `colors[i].rgb` is class `i`'s color; `visible[i].x >= 0.5` shows class `i`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct CellStyleUniform {
+    colors: [[f32; 4]; CELL_STYLE_CLASS_CAP],
+    visible: [[f32; 4]; CELL_STYLE_CLASS_CAP],
+}
+
+impl Default for CellStyleUniform {
+    fn default() -> Self {
+        // Reproduce the legacy `class_id % 6` palette so a host that never calls
+        // set_cell_class_colors renders identically to the previous hardcoded shader.
+        const PALETTE: [[f32; 3]; 6] = [
+            [0.00, 0.78, 0.86],
+            [1.00, 0.55, 0.24],
+            [0.48, 0.82, 0.36],
+            [0.92, 0.38, 0.58],
+            [0.62, 0.55, 0.98],
+            [0.98, 0.82, 0.24],
+        ];
+        let mut colors = [[0.0_f32; 4]; CELL_STYLE_CLASS_CAP];
+        let mut visible = [[0.0_f32; 4]; CELL_STYLE_CLASS_CAP];
+        for i in 0..CELL_STYLE_CLASS_CAP {
+            let base = PALETTE[i % 6];
+            colors[i] = [base[0], base[1], base[2], 1.0];
+            visible[i] = [1.0, 0.0, 0.0, 0.0];
+        }
+        Self { colors, visible }
+    }
 }
 
 #[repr(C)]
@@ -3724,24 +3839,22 @@ mod tests {
     }
 
     #[test]
-    fn overlay_class_filter_controls_visibility() {
-        let mut style = OverlayStyle::default();
-        // Default shows everything.
-        assert!(style.class_visible(0));
-        assert!(style.class_visible(5));
+    fn visible_class_flags_maps_inclusive_set() {
+        // `None` shows every class.
+        let all = visible_class_flags(None);
+        assert_eq!(all.len(), CELL_STYLE_CLASS_CAP);
+        assert!(all.iter().all(|&flag| flag == 1));
 
-        style.set_class_filter(Some(&[1]));
-        assert!(!style.class_visible(0));
-        assert!(style.class_visible(1));
-        assert!(!style.class_visible(2));
-        // Ids beyond the mask (and hover/selected sentinels) stay visible.
-        assert!(style.class_visible(OVERLAY_CLASS_MASK_BITS));
-        assert!(style.class_visible(OVERLAY_HOVER_CLASS_ID));
-        assert!(style.class_visible(OVERLAY_SELECTED_CLASS_ID));
+        // A list shows only the listed ids; out-of-range ids are ignored.
+        let some = visible_class_flags(Some(&[1, 3, CELL_STYLE_CLASS_CAP as u32 + 5]));
+        assert_eq!(some[0], 0);
+        assert_eq!(some[1], 1);
+        assert_eq!(some[2], 0);
+        assert_eq!(some[3], 1);
+        assert!(some[4..].iter().all(|&flag| flag == 0));
 
-        style.set_class_filter(None);
-        assert!(style.class_visible(0));
-        assert!(style.class_visible(2));
+        // An empty list hides everything.
+        assert!(visible_class_flags(Some(&[])).iter().all(|&flag| flag == 0));
     }
 
     #[test]

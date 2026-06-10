@@ -346,9 +346,34 @@ export class FoveaViewer {
    * Restricts which cell classes are rendered and picked. Pass an array of class
    * ids to show only those classes, or `null` to show every class. Hidden cells
    * are not drawn and cannot be hovered or clicked.
+   *
+   * This is an ergonomic wrapper over {@link setCellClassVisibility} that pairs
+   * naturally with {@link getCellClasses}: pass back the subset of ids you want
+   * to keep visible.
    */
   setVisibleCellClasses(classIds: number[] | null): void {
     this.wasm.setVisibleCellClasses(JSON.stringify(classIds));
+  }
+
+  /**
+   * Set per-class cell colors. `rgba` is a flat array of 4 numbers (r, g, b, a in
+   * 0..1) per class, indexed by classId. Up to 64 classes are stored.
+   */
+  setCellClassColors(rgba: ArrayLike<number>): void {
+    const data = rgba instanceof Float32Array ? rgba : Float32Array.from(rgba);
+    this.wasm.setCellClassColors(data);
+  }
+
+  /**
+   * Set per-class cell visibility, indexed by classId. A truthy entry shows the
+   * class; hidden classes are neither drawn nor hoverable.
+   */
+  setCellClassVisibility(flags: ArrayLike<boolean | number>): void {
+    const data = new Uint8Array(flags.length);
+    for (let i = 0; i < flags.length; i += 1) {
+      data[i] = flags[i] ? 1 : 0;
+    }
+    this.wasm.setCellClassVisibility(data);
   }
 
   on<K extends keyof FoveaViewerEvents>(
@@ -376,6 +401,36 @@ export class FoveaViewer {
 
   zoomAtCanvasPoint(x: number, y: number, wheelDeltaY: number): void {
     this.wasm.zoomAt(x, y, wheelDeltaY);
+  }
+
+  /**
+   * Current camera in slide-pixel coordinates. `zoom` is CSS-px per slide-px
+   * (the visible slide width in pixels is `canvasCssWidth / zoom`).
+   */
+  getCamera(): { centerX: number; centerY: number; zoom: number } {
+    const c = this.wasm.getCamera();
+    return { centerX: c[0], centerY: c[1], zoom: c[2] };
+  }
+
+  /**
+   * Apply a camera directly (slide-pixel center + CSS-px-per-slide-px zoom),
+   * clamped to the world. Does NOT emit a `viewport-change` event — use it to
+   * apply a remote/programmatic viewport without echoing it back.
+   */
+  setCamera(centerX: number, centerY: number, zoom: number): void {
+    this.wasm.setCamera(centerX, centerY, zoom);
+  }
+
+  /** Convert canvas/CSS-pixel coordinates to slide-pixel coordinates. */
+  screenToSlide(x: number, y: number): { x: number; y: number } {
+    const p = this.wasm.screenToSlide(x, y);
+    return { x: p[0], y: p[1] };
+  }
+
+  /** Convert slide-pixel coordinates to canvas/CSS-pixel coordinates. */
+  slideToScreen(x: number, y: number): { x: number; y: number } {
+    const p = this.wasm.slideToScreen(x, y);
+    return { x: p[0], y: p[1] };
   }
 
   getPerformanceStats(): PerformanceStats {

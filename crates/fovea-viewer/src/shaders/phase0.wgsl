@@ -6,8 +6,6 @@ struct Camera {
   _pad1: vec2<f32>,
   overlay: vec4<f32>,
   heatmap: vec4<f32>,
-  // Per-class visibility bitmask (1 = visible), 256 classes across 8 u32 words.
-  class_mask: array<vec4<u32>, 2>,
 };
 
 @group(0) @binding(0)
@@ -18,6 +16,19 @@ var quad_texture: texture_2d<f32>;
 
 @group(1) @binding(1)
 var quad_sampler: sampler;
+
+// Per-class cell styling, set from the host (PathCollab pushes its cell-type
+// palette + per-type visibility here). `colors[i].rgb` is the color for class i;
+// `visible[i].x >= 0.5` means class i is shown. Only the overlay pipelines bind
+// this group; defaults reproduce the built-in class_id % 6 palette so a host that
+// never sets it renders identically to before.
+struct CellStyle {
+  colors: array<vec4<f32>, 64>,
+  visible: array<vec4<f32>, 64>,
+};
+
+@group(2) @binding(0)
+var<uniform> cell_style: CellStyle;
 
 struct VertexOut {
   @builtin(position) position: vec4<f32>,
@@ -157,48 +168,25 @@ fn class_color(class_id: u32) -> vec4<f32> {
     return vec4<f32>(1.0, 0.92, 0.16, 1.0);
   }
 
-  let value = class_id % 6u;
-  if value == 0u {
-    return vec4<f32>(0.00, 0.78, 0.86, 1.0);
-  }
-  if value == 1u {
-    return vec4<f32>(1.00, 0.55, 0.24, 1.0);
-  }
-  if value == 2u {
-    return vec4<f32>(0.48, 0.82, 0.36, 1.0);
-  }
-  if value == 3u {
-    return vec4<f32>(0.92, 0.38, 0.58, 1.0);
-  }
-  if value == 4u {
-    return vec4<f32>(0.62, 0.55, 0.98, 1.0);
-  }
-  return vec4<f32>(0.98, 0.82, 0.24, 1.0);
-}
-
-fn class_mask_word(index: u32) -> u32 {
-  let vec_index = index / 4u;
-  let component = index % 4u;
-  let words = camera.class_mask[vec_index];
-  if component == 0u {
-    return words.x;
-  }
-  if component == 1u {
-    return words.y;
-  }
-  if component == 2u {
-    return words.z;
-  }
-  return words.w;
+  return cell_style.colors[min(class_id, 63u)];
 }
 
 fn class_visible(class_id: u32) -> bool {
-  // Hover/selected sentinels and ids beyond the mask are always shown.
-  if class_id >= 256u {
+  // Hover (u32::MAX) and selection (u32::MAX-1) highlights are always shown.
+  if class_id >= 4294967294u {
     return true;
   }
-  let word = class_mask_word(class_id / 32u);
-  return ((word >> (class_id % 32u)) & 1u) == 1u;
+  return cell_style.visible[min(class_id, 63u)].x >= 0.5;
+}
+
+// A clip-space position that is fully outside the view, used to drop the
+// vertices of a hidden cell class so it is not rasterized.
+fn hidden_vertex() -> VertexOut {
+  var out: VertexOut;
+  out.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+  out.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  out.uv = vec2<f32>(0.0, 0.0);
+  return out;
 }
 
 @vertex
@@ -208,11 +196,7 @@ fn vs_overlay_point(
   @location(1) class_id: u32
 ) -> VertexOut {
   if !class_visible(class_id) {
-    var hidden: VertexOut;
-    hidden.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-    hidden.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    hidden.uv = vec2<f32>(0.0, 0.0);
-    return hidden;
+    return hidden_vertex();
   }
   var corners = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0),
@@ -254,11 +238,7 @@ fn vs_overlay_line(
   @location(4) class_id: u32
 ) -> VertexOut {
   if !class_visible(class_id) {
-    var hidden: VertexOut;
-    hidden.position = vec4<f32>(2.0, 2.0, 2.0, 1.0);
-    hidden.color = vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    hidden.uv = vec2<f32>(0.0, 0.0);
-    return hidden;
+    return hidden_vertex();
   }
   let world_position = segment_start + (segment_end - segment_start) * endpoint;
   let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
