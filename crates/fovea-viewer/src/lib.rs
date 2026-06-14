@@ -50,7 +50,7 @@ impl FoveaViewer {
 
         let mut renderer = Renderer::new(canvas).await?;
         let camera =
-            Camera::fit_dimensions(renderer.width, renderer.height, WORLD_SIZE, WORLD_SIZE);
+            Camera::fit_dimensions(renderer.width, renderer.height, WORLD_SIZE, WORLD_SIZE, 1.0);
         renderer.write_camera(&camera);
         renderer.set_point_count(100_000)?;
 
@@ -75,11 +75,13 @@ impl FoveaViewer {
     #[wasm_bindgen(js_name = loadManifest)]
     pub fn load_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
         let manifest = SlideManifest::from_json(manifest_json)?;
+        let device_pixel_ratio = self.camera.device_pixel_ratio;
         self.camera = Camera::fit_dimensions(
             self.renderer.width,
             self.renderer.height,
             manifest.width,
             manifest.height,
+            device_pixel_ratio,
         );
         self.renderer.set_slide_manifest(manifest);
         self.renderer.write_camera(&self.camera);
@@ -92,8 +94,14 @@ impl FoveaViewer {
             .renderer
             .slide_dimensions()
             .unwrap_or((WORLD_SIZE, WORLD_SIZE));
-        self.camera =
-            Camera::fit_dimensions(self.renderer.width, self.renderer.height, width, height);
+        let device_pixel_ratio = self.camera.device_pixel_ratio;
+        self.camera = Camera::fit_dimensions(
+            self.renderer.width,
+            self.renderer.height,
+            width,
+            height,
+            device_pixel_ratio,
+        );
         self.renderer.write_camera(&self.camera);
     }
 
@@ -154,11 +162,13 @@ impl FoveaViewer {
         let dimensions = manifest.dimensions();
         self.renderer.set_cell_overlay_manifest(manifest);
         if should_fit_overlay {
+            let device_pixel_ratio = self.camera.device_pixel_ratio;
             self.camera = Camera::fit_dimensions(
                 self.renderer.width,
                 self.renderer.height,
                 dimensions.0,
                 dimensions.1,
+                device_pixel_ratio,
             );
             self.renderer.write_camera(&self.camera);
         }
@@ -172,11 +182,13 @@ impl FoveaViewer {
         let dimensions = manifest.dimensions();
         self.renderer.set_heatmap_manifest(manifest);
         if should_fit_heatmap {
+            let device_pixel_ratio = self.camera.device_pixel_ratio;
             self.camera = Camera::fit_dimensions(
                 self.renderer.width,
                 self.renderer.height,
                 dimensions.0,
                 dimensions.1,
+                device_pixel_ratio,
             );
             self.renderer.write_camera(&self.camera);
         }
@@ -516,9 +528,19 @@ struct Camera {
 }
 
 impl Camera {
-    fn fit_dimensions(width: u32, height: u32, world_width: f64, world_height: f64) -> Self {
-        let viewport_width = width.max(1) as f64;
-        let viewport_height = height.max(1) as f64;
+    fn fit_dimensions(
+        width: u32,
+        height: u32,
+        world_width: f64,
+        world_height: f64,
+        device_pixel_ratio: f64,
+    ) -> Self {
+        // `width`/`height` are device pixels (the canvas backbuffer). The camera's screen space is
+        // logical/CSS pixels — the same space cursor coordinates and pan deltas arrive in, and the
+        // space `resize` stores. Convert device -> logical here so the two code paths agree.
+        let device_pixel_ratio = device_pixel_ratio.max(0.00001);
+        let viewport_width = (f64::from(width.max(1)) / device_pixel_ratio).max(1.0);
+        let viewport_height = (f64::from(height.max(1)) / device_pixel_ratio).max(1.0);
         let zoom_x = viewport_width * 0.92 / world_width.max(1.0);
         let zoom_y = viewport_height * 0.92 / world_height.max(1.0);
         let zoom = zoom_x.min(zoom_y).clamp(0.00001, 16.0);
@@ -527,9 +549,9 @@ impl Camera {
             center_x: world_width * 0.5,
             center_y: world_height * 0.5,
             zoom,
-            viewport_width_px: width.max(1),
-            viewport_height_px: height.max(1),
-            device_pixel_ratio: 1.0,
+            viewport_width_px: viewport_width.round() as u32,
+            viewport_height_px: viewport_height.round() as u32,
+            device_pixel_ratio,
             world_width,
             world_height,
         }
@@ -1335,7 +1357,7 @@ impl Renderer {
 
         let overlay_style = OverlayStyle::default();
         let heatmap_style = HeatmapStyle::default();
-        let camera_uniform = Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE)
+        let camera_uniform = Camera::fit_dimensions(width, height, WORLD_SIZE, WORLD_SIZE, 1.0)
             .as_uniform_with_heatmap(overlay_style, heatmap_style);
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("fovea-camera"),
@@ -3633,7 +3655,7 @@ mod tests {
 
     #[test]
     fn camera_round_trip_preserves_slide_coordinates() {
-        let camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0);
+        let camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0, 1.0);
         let slide = (4_321.25, 3_456.75);
         let screen = camera.slide_to_screen(slide.0, slide.1);
         let round_trip = camera.screen_to_slide(screen.0, screen.1);
@@ -3644,7 +3666,41 @@ mod tests {
 
     #[test]
     fn zoom_at_keeps_anchor_slide_coordinate_stable() {
-        let mut camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0);
+        let mut camera = Camera::fit_dimensions(800, 600, 10_000.0, 8_000.0, 1.0);
+        let anchor = (520.0, 375.0);
+        let before = camera.screen_to_slide(anchor.0, anchor.1);
+
+        camera.zoom_at(anchor.0, anchor.1, -240.0);
+
+        let after = camera.screen_to_slide(anchor.0, anchor.1);
+        assert_close(after.0, before.0, EPSILON);
+        assert_close(after.1, before.1, EPSILON);
+    }
+
+    #[test]
+    fn fit_dimensions_uses_logical_pixels_on_hidpi() {
+        // Device-pixel canvas of 1600x1200 on a 2x display is an 800x600 logical viewport. The
+        // camera's screen space must be logical pixels so that CSS-pixel cursor coordinates map
+        // correctly. This is the regression guard for the "zoom drifts to the upper-left" bug.
+        let camera = Camera::fit_dimensions(1600, 1200, 10_000.0, 8_000.0, 2.0);
+
+        assert_eq!(camera.viewport_width_px, 800);
+        assert_eq!(camera.viewport_height_px, 600);
+        assert_close(camera.device_pixel_ratio, 2.0, EPSILON);
+
+        // A cursor at the logical viewport center must anchor at the slide center, not up-and-left.
+        let center = camera.screen_to_slide(
+            camera.viewport_width_px as f64 * 0.5,
+            camera.viewport_height_px as f64 * 0.5,
+        );
+        assert_close(center.0, camera.center_x, EPSILON);
+        assert_close(center.1, camera.center_y, EPSILON);
+    }
+
+    #[test]
+    fn zoom_at_keeps_anchor_stable_on_hidpi() {
+        // Same anchor invariant as above, but on a 2x display where the bug previously surfaced.
+        let mut camera = Camera::fit_dimensions(1600, 1200, 10_000.0, 8_000.0, 2.0);
         let anchor = (520.0, 375.0);
         let before = camera.screen_to_slide(anchor.0, anchor.1);
 
@@ -3695,7 +3751,7 @@ mod tests {
             }"#,
         )
         .expect("manifest parses");
-        let mut camera = Camera::fit_dimensions(256, 256, 512.0, 512.0);
+        let mut camera = Camera::fit_dimensions(256, 256, 512.0, 512.0, 1.0);
         camera.center_x = 256.0;
         camera.center_y = 256.0;
         camera.zoom = 1.0;
@@ -3847,7 +3903,7 @@ mod tests {
 
     #[test]
     fn cell_pick_distance_uses_camera_screen_coordinates() {
-        let camera = Camera::fit_dimensions(400, 300, 1_000.0, 1_000.0);
+        let camera = Camera::fit_dimensions(400, 300, 1_000.0, 1_000.0, 1.0);
         let cell = CellPickRecord {
             cell_id: 1,
             class_id: 2,
