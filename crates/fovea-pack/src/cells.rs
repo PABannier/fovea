@@ -579,28 +579,31 @@ fn simplify_by_stride(points: &[Point], max_vertices: usize) -> Vec<Point> {
 
 #[derive(Default)]
 struct ClassIds {
-    by_name: HashMap<String, u16>,
+    names: Vec<String>,
 }
 
 impl ClassIds {
     fn id_for(&mut self, name: &str) -> u16 {
-        if let Some(id) = self.by_name.get(name) {
-            return *id;
-        }
-
-        let id = self.by_name.len().min(u16::MAX as usize) as u16;
-        self.by_name.insert(name.to_string(), id);
-        id
+        let index = self
+            .names
+            .iter()
+            .position(|known| known == name)
+            .unwrap_or_else(|| {
+                self.names.push(name.to_string());
+                self.names.len() - 1
+            });
+        index.min(u16::MAX as usize) as u16
     }
 
     fn into_manifest(self) -> Vec<CellClassManifest> {
-        let mut classes: Vec<_> = self
-            .by_name
+        self.names
             .into_iter()
-            .map(|(name, id)| CellClassManifest { id, name })
-            .collect();
-        classes.sort_by_key(|class| class.id);
-        classes
+            .enumerate()
+            .map(|(id, name)| CellClassManifest {
+                id: id.min(u16::MAX as usize) as u16,
+                name,
+            })
+            .collect()
     }
 }
 
@@ -846,6 +849,30 @@ mod tests {
         })
         .unwrap_err();
         assert!(format!("{error:#}").contains("failed to read /nonexistent/cells.pb"));
+    }
+
+    #[test]
+    fn class_ids_keep_first_seen_order() {
+        let mut class_ids = super::ClassIds::default();
+        let ids: Vec<u16> = ["tumor", "stroma", "tumor", "immune", "stroma"]
+            .into_iter()
+            .map(|name| class_ids.id_for(name))
+            .collect();
+        assert_eq!(ids, [0, 1, 0, 2, 1]);
+
+        let manifest: Vec<(u16, String)> = class_ids
+            .into_manifest()
+            .into_iter()
+            .map(|class| (class.id, class.name))
+            .collect();
+        assert_eq!(
+            manifest,
+            [
+                (0, "tumor".to_string()),
+                (1, "stroma".to_string()),
+                (2, "immune".to_string())
+            ]
+        );
     }
 
     #[test]
