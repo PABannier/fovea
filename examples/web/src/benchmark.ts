@@ -15,6 +15,24 @@ interface BenchmarkResult {
   error?: string;
 }
 
+// Fields summarized as the max over all samples. Declared before the top-level awaits that call
+// summarize(), so it is initialized by then.
+const MAX_KEYS = [
+  "drawCalls",
+  "visibleTiles",
+  "loadedTiles",
+  "visibleHeatmapTiles",
+  "loadedHeatmapTiles",
+  "visibleCellChunks",
+  "loadedCellChunks",
+  "visibleCells",
+  "visibleObjects",
+  "gpuMemoryMb",
+  "cpuMemoryMbEstimate",
+  "gpuBufferMemoryBytes",
+  "cpuMemoryBytes"
+] as const satisfies readonly (keyof PerformanceStats)[];
+
 const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
 const output = document.querySelector<HTMLPreElement>("#benchmark-output");
 
@@ -102,7 +120,7 @@ function summarize(samples: PerformanceStats[]): PerformanceStats {
   }
 
   const latest = samples[samples.length - 1];
-  return {
+  const summary: PerformanceStats = {
     ...latest,
     fps: percentile(
       samples.map((sample) => sample.fps),
@@ -127,21 +145,14 @@ function summarize(samples: PerformanceStats[]): PerformanceStats {
     uploadTimeMs: percentile(
       samples.map((sample) => sample.uploadTimeMs),
       0.95
-    ),
-    drawCalls: Math.max(...samples.map((sample) => sample.drawCalls)),
-    visibleTiles: Math.max(...samples.map((sample) => sample.visibleTiles)),
-    loadedTiles: Math.max(...samples.map((sample) => sample.loadedTiles)),
-    visibleHeatmapTiles: Math.max(...samples.map((sample) => sample.visibleHeatmapTiles)),
-    loadedHeatmapTiles: Math.max(...samples.map((sample) => sample.loadedHeatmapTiles)),
-    visibleCellChunks: Math.max(...samples.map((sample) => sample.visibleCellChunks)),
-    loadedCellChunks: Math.max(...samples.map((sample) => sample.loadedCellChunks)),
-    visibleCells: Math.max(...samples.map((sample) => sample.visibleCells)),
-    visibleObjects: Math.max(...samples.map((sample) => sample.visibleObjects)),
-    gpuMemoryMb: Math.max(...samples.map((sample) => sample.gpuMemoryMb)),
-    cpuMemoryMbEstimate: Math.max(...samples.map((sample) => sample.cpuMemoryMbEstimate)),
-    gpuBufferMemoryBytes: Math.max(...samples.map((sample) => sample.gpuBufferMemoryBytes)),
-    cpuMemoryBytes: Math.max(...samples.map((sample) => sample.cpuMemoryBytes))
+    )
   };
+
+  for (const key of MAX_KEYS) {
+    summary[key] = Math.max(...samples.map((sample) => sample[key]));
+  }
+
+  return summary;
 }
 
 function percentile(values: number[], p: number): number {
