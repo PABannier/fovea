@@ -806,8 +806,6 @@ mod new_proto {
 }
 
 mod legacy_proto {
-    use std::collections::HashMap;
-
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct SegmentationPolygon {
         #[prost(int32, optional, tag = "1")]
@@ -832,10 +830,6 @@ mod legacy_proto {
 
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct TileSegmentationData {
-        #[prost(string, optional, tag = "1")]
-        pub tile_id: Option<String>,
-        #[prost(int32, optional, tag = "2")]
-        pub level: Option<i32>,
         #[prost(float, optional, tag = "3")]
         pub x: Option<f32>,
         #[prost(float, optional, tag = "4")]
@@ -846,20 +840,6 @@ mod legacy_proto {
         pub height: Option<i32>,
         #[prost(message, repeated, tag = "7")]
         pub masks: Vec<SegmentationPolygon>,
-        #[prost(message, optional, tag = "8")]
-        pub tissue_segmentation_map: Option<TissueSegmentationMap>,
-    }
-
-    #[derive(Clone, PartialEq, ::prost::Message)]
-    pub struct TissueSegmentationMap {
-        #[prost(bytes, optional, tag = "1")]
-        pub data: Option<Vec<u8>>,
-        #[prost(int32, optional, tag = "2")]
-        pub width: Option<i32>,
-        #[prost(int32, optional, tag = "3")]
-        pub height: Option<i32>,
-        #[prost(string, optional, tag = "4")]
-        pub dtype: Option<String>,
     }
 
     #[derive(Clone, PartialEq, ::prost::Message)]
@@ -870,22 +850,121 @@ mod legacy_proto {
         pub slide_path: Option<String>,
         #[prost(float, optional, tag = "3")]
         pub mpp: Option<f32>,
-        #[prost(int32, optional, tag = "4")]
-        pub max_level: Option<i32>,
-        #[prost(string, optional, tag = "5")]
-        pub cell_model_name: Option<String>,
-        #[prost(string, optional, tag = "6")]
-        pub tissue_model_name: Option<String>,
         #[prost(message, repeated, tag = "8")]
         pub tiles: Vec<TileSegmentationData>,
-        #[prost(map = "int32, string", tag = "9")]
-        pub tissue_class_mapping: HashMap<i32, String>,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{polygon_centroid, quantize, Point};
+
+    #[test]
+    fn legacy_decode_skips_unread_fields() {
+        use super::legacy_proto;
+        use prost::Message;
+
+        // Full legacy schema, including the fields the trimmed decoder dropped.
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        struct FullTissueMap {
+            #[prost(bytes, optional, tag = "1")]
+            data: Option<Vec<u8>>,
+            #[prost(int32, optional, tag = "2")]
+            width: Option<i32>,
+            #[prost(int32, optional, tag = "3")]
+            height: Option<i32>,
+            #[prost(string, optional, tag = "4")]
+            dtype: Option<String>,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        struct FullTile {
+            #[prost(string, optional, tag = "1")]
+            tile_id: Option<String>,
+            #[prost(int32, optional, tag = "2")]
+            level: Option<i32>,
+            #[prost(float, optional, tag = "3")]
+            x: Option<f32>,
+            #[prost(float, optional, tag = "4")]
+            y: Option<f32>,
+            #[prost(int32, optional, tag = "5")]
+            width: Option<i32>,
+            #[prost(int32, optional, tag = "6")]
+            height: Option<i32>,
+            #[prost(message, repeated, tag = "7")]
+            masks: Vec<legacy_proto::SegmentationPolygon>,
+            #[prost(message, optional, tag = "8")]
+            tissue_segmentation_map: Option<FullTissueMap>,
+        }
+
+        #[derive(Clone, PartialEq, ::prost::Message)]
+        struct FullSlide {
+            #[prost(string, optional, tag = "1")]
+            slide_id: Option<String>,
+            #[prost(string, optional, tag = "2")]
+            slide_path: Option<String>,
+            #[prost(float, optional, tag = "3")]
+            mpp: Option<f32>,
+            #[prost(int32, optional, tag = "4")]
+            max_level: Option<i32>,
+            #[prost(string, optional, tag = "5")]
+            cell_model_name: Option<String>,
+            #[prost(string, optional, tag = "6")]
+            tissue_model_name: Option<String>,
+            #[prost(message, repeated, tag = "8")]
+            tiles: Vec<FullTile>,
+            #[prost(map = "int32, string", tag = "9")]
+            tissue_class_mapping: std::collections::HashMap<i32, String>,
+        }
+
+        let point = |x, y| legacy_proto::Point {
+            x: Some(x),
+            y: Some(y),
+        };
+        let mask = legacy_proto::SegmentationPolygon {
+            cell_id: Some(7),
+            cell_type: Some("tumor".to_string()),
+            confidence: Some(0.5),
+            coordinates: vec![point(0.0, 0.0), point(4.0, 0.0), point(4.0, 4.0)],
+            centroid: Some(point(2.0, 1.0)),
+        };
+        let full = FullSlide {
+            slide_id: Some("slide".to_string()),
+            slide_path: Some("/slides/a.svs".to_string()),
+            mpp: Some(0.25),
+            max_level: Some(3),
+            cell_model_name: Some("cells".to_string()),
+            tissue_model_name: Some("tissue".to_string()),
+            tiles: vec![FullTile {
+                tile_id: Some("t0".to_string()),
+                level: Some(0),
+                x: Some(512.0),
+                y: Some(256.0),
+                width: Some(224),
+                height: Some(224),
+                masks: vec![mask.clone()],
+                tissue_segmentation_map: Some(FullTissueMap {
+                    data: Some(vec![1, 2, 3]),
+                    width: Some(1),
+                    height: Some(3),
+                    dtype: Some("uint8".to_string()),
+                }),
+            }],
+            tissue_class_mapping: [(1, "stroma".to_string())].into(),
+        };
+
+        let decoded =
+            legacy_proto::SlideSegmentationData::decode(full.encode_to_vec().as_slice()).unwrap();
+
+        assert_eq!(decoded.slide_id.as_deref(), Some("slide"));
+        assert_eq!(decoded.slide_path.as_deref(), Some("/slides/a.svs"));
+        assert_eq!(decoded.mpp, Some(0.25));
+        assert_eq!(decoded.tiles.len(), 1);
+        let tile = &decoded.tiles[0];
+        assert_eq!((tile.x, tile.y), (Some(512.0), Some(256.0)));
+        assert_eq!((tile.width, tile.height), (Some(224), Some(224)));
+        assert_eq!(tile.masks, vec![mask]);
+    }
 
     #[test]
     fn quantize_clamps_to_chunk() {
