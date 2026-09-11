@@ -432,87 +432,32 @@ enum ViewerEvent {
 
 #[wasm_bindgen]
 pub struct FrameStats {
-    frame_time_ms: f64,
-    upload_time_ms: f64,
-    draw_call_count: u32,
-    visible_object_count: u32,
-    visible_tile_count: u32,
-    loaded_tile_count: u32,
-    visible_heatmap_tile_count: u32,
-    loaded_heatmap_tile_count: u32,
-    visible_cell_chunk_count: u32,
-    loaded_cell_chunk_count: u32,
-    visible_cell_count: u32,
-    gpu_buffer_memory_bytes: u32,
-    cpu_memory_bytes: u32,
-}
-
-#[wasm_bindgen]
-impl FrameStats {
-    #[wasm_bindgen(getter, js_name = frameTimeMs)]
-    pub fn frame_time_ms(&self) -> f64 {
-        self.frame_time_ms
-    }
-
-    #[wasm_bindgen(getter, js_name = uploadTimeMs)]
-    pub fn upload_time_ms(&self) -> f64 {
-        self.upload_time_ms
-    }
-
-    #[wasm_bindgen(getter, js_name = drawCallCount)]
-    pub fn draw_call_count(&self) -> u32 {
-        self.draw_call_count
-    }
-
-    #[wasm_bindgen(getter, js_name = visibleObjectCount)]
-    pub fn visible_object_count(&self) -> u32 {
-        self.visible_object_count
-    }
-
-    #[wasm_bindgen(getter, js_name = visibleTileCount)]
-    pub fn visible_tile_count(&self) -> u32 {
-        self.visible_tile_count
-    }
-
-    #[wasm_bindgen(getter, js_name = loadedTileCount)]
-    pub fn loaded_tile_count(&self) -> u32 {
-        self.loaded_tile_count
-    }
-
-    #[wasm_bindgen(getter, js_name = visibleHeatmapTileCount)]
-    pub fn visible_heatmap_tile_count(&self) -> u32 {
-        self.visible_heatmap_tile_count
-    }
-
-    #[wasm_bindgen(getter, js_name = loadedHeatmapTileCount)]
-    pub fn loaded_heatmap_tile_count(&self) -> u32 {
-        self.loaded_heatmap_tile_count
-    }
-
-    #[wasm_bindgen(getter, js_name = visibleCellChunkCount)]
-    pub fn visible_cell_chunk_count(&self) -> u32 {
-        self.visible_cell_chunk_count
-    }
-
-    #[wasm_bindgen(getter, js_name = loadedCellChunkCount)]
-    pub fn loaded_cell_chunk_count(&self) -> u32 {
-        self.loaded_cell_chunk_count
-    }
-
-    #[wasm_bindgen(getter, js_name = visibleCellCount)]
-    pub fn visible_cell_count(&self) -> u32 {
-        self.visible_cell_count
-    }
-
-    #[wasm_bindgen(getter, js_name = gpuBufferMemoryBytes)]
-    pub fn gpu_buffer_memory_bytes(&self) -> u32 {
-        self.gpu_buffer_memory_bytes
-    }
-
-    #[wasm_bindgen(getter, js_name = cpuMemoryBytes)]
-    pub fn cpu_memory_bytes(&self) -> u32 {
-        self.cpu_memory_bytes
-    }
+    #[wasm_bindgen(readonly, js_name = frameTimeMs)]
+    pub frame_time_ms: f64,
+    #[wasm_bindgen(readonly, js_name = uploadTimeMs)]
+    pub upload_time_ms: f64,
+    #[wasm_bindgen(readonly, js_name = drawCallCount)]
+    pub draw_call_count: u32,
+    #[wasm_bindgen(readonly, js_name = visibleObjectCount)]
+    pub visible_object_count: u32,
+    #[wasm_bindgen(readonly, js_name = visibleTileCount)]
+    pub visible_tile_count: u32,
+    #[wasm_bindgen(readonly, js_name = loadedTileCount)]
+    pub loaded_tile_count: u32,
+    #[wasm_bindgen(readonly, js_name = visibleHeatmapTileCount)]
+    pub visible_heatmap_tile_count: u32,
+    #[wasm_bindgen(readonly, js_name = loadedHeatmapTileCount)]
+    pub loaded_heatmap_tile_count: u32,
+    #[wasm_bindgen(readonly, js_name = visibleCellChunkCount)]
+    pub visible_cell_chunk_count: u32,
+    #[wasm_bindgen(readonly, js_name = loadedCellChunkCount)]
+    pub loaded_cell_chunk_count: u32,
+    #[wasm_bindgen(readonly, js_name = visibleCellCount)]
+    pub visible_cell_count: u32,
+    #[wasm_bindgen(readonly, js_name = gpuBufferMemoryBytes)]
+    pub gpu_buffer_memory_bytes: u32,
+    #[wasm_bindgen(readonly, js_name = cpuMemoryBytes)]
+    pub cpu_memory_bytes: u32,
 }
 
 #[derive(Clone, Copy)]
