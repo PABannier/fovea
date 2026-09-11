@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 use crate::{
-    manifest::{ImageFormat, LevelManifest, Manifest, Size, TileManifest},
+    manifest::{ImageFormat, LevelManifest, Manifest, TileManifest},
     reader::SlideReader,
 };
 
@@ -27,10 +27,7 @@ pub fn build_slide_manifest(
     }
 
     let dimensions = reader.dimensions()?;
-    let properties = reader.properties();
-    let metadata = properties.metadata();
     let levels = collect_levels(reader, tile_size)?;
-    let consistency_error = coordinate_consistency_max_error(&levels, dimensions);
     let mut tiles = Vec::new();
     let extension = image_format.extension();
 
@@ -62,9 +59,6 @@ pub fn build_slide_manifest(
         height: dimensions.height,
         levels,
         tiles,
-        associated_images: Vec::new(),
-        metadata,
-        coordinate_consistency_max_error_px: consistency_error,
     })
 }
 
@@ -121,7 +115,6 @@ fn collect_levels(reader: &dyn SlideReader, tile_size: u32) -> Result<Vec<LevelM
             downsample: reader.level_downsample(level)?,
             tile_cols,
             tile_rows,
-            tile_count: tile_cols * tile_rows,
         });
     }
 
@@ -149,17 +142,4 @@ pub fn encode_image_bytes(image: &RgbaImage, format: ImageFormat) -> Result<Vec<
     }
 
     Ok(bytes.into_inner())
-}
-
-fn coordinate_consistency_max_error(levels: &[LevelManifest], level0: Size) -> f64 {
-    levels
-        .iter()
-        .map(|level| {
-            let width_error =
-                (f64::from(level.width) * level.downsample - f64::from(level0.width)).abs();
-            let height_error =
-                (f64::from(level.height) * level.downsample - f64::from(level0.height)).abs();
-            width_error.max(height_error)
-        })
-        .fold(0.0, f64::max)
 }

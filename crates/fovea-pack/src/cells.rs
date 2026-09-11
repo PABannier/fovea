@@ -112,18 +112,6 @@ pub(crate) struct CellChunkManifest {
     pub(crate) y: u32,
     pub(crate) path: String,
     pub(crate) cell_count: u32,
-    pub(crate) polygon_vertex_count: u32,
-    pub(crate) byte_size: u64,
-    pub(crate) bbox: ChunkBBoxManifest,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ChunkBBoxManifest {
-    pub(crate) min_x: f32,
-    pub(crate) min_y: f32,
-    pub(crate) max_x: f32,
-    pub(crate) max_y: f32,
 }
 
 pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<InMemoryCells> {
@@ -355,21 +343,13 @@ fn build_packed_cells(
     for (key, cells) in chunks {
         let file_name = format!("{}_{}.fovc", key.x, key.y);
         let relative_path = format!("chunks/{file_name}");
-        let (bytes, stats) = encode_chunk(key, input.chunk_size, &cells)?;
+        let bytes = encode_chunk(key, input.chunk_size, &cells)?;
 
         chunk_manifests.push(CellChunkManifest {
             x: key.x,
             y: key.y,
             path: relative_path,
             cell_count: cells.len() as u32,
-            polygon_vertex_count: stats.polygon_vertex_count,
-            byte_size: stats.byte_size,
-            bbox: ChunkBBoxManifest {
-                min_x: stats.bbox.min_x,
-                min_y: stats.bbox.min_y,
-                max_x: stats.bbox.max_x,
-                max_y: stats.bbox.max_y,
-            },
         });
         chunk_bytes.insert((key.x, key.y), bytes);
     }
@@ -624,18 +604,7 @@ impl ClassIds {
     }
 }
 
-#[derive(Debug)]
-struct ChunkStats {
-    polygon_vertex_count: u32,
-    byte_size: u64,
-    bbox: BBox,
-}
-
-fn encode_chunk(
-    key: ChunkKey,
-    chunk_size: u32,
-    cells: &[CellRecord],
-) -> Result<(Vec<u8>, ChunkStats)> {
+fn encode_chunk(key: ChunkKey, chunk_size: u32, cells: &[CellRecord]) -> Result<Vec<u8>> {
     let mut writer = Vec::new();
     let origin_x = (key.x * chunk_size) as f32;
     let origin_y = (key.y * chunk_size) as f32;
@@ -644,12 +613,6 @@ fn encode_chunk(
         .map(|cell| cell.polygon.len())
         .sum::<usize>()
         .min(u32::MAX as usize) as u32;
-    let mut bbox = BBox {
-        min_x: f32::MAX,
-        min_y: f32::MAX,
-        max_x: f32::MIN,
-        max_y: f32::MIN,
-    };
 
     writer.write_all(b"FOVC")?;
     write_u32(&mut writer, 1)?;
@@ -664,11 +627,6 @@ fn encode_chunk(
 
     let mut vertex_offset = 0_u32;
     for cell in cells {
-        bbox.min_x = bbox.min_x.min(cell.bbox.min_x);
-        bbox.min_y = bbox.min_y.min(cell.bbox.min_y);
-        bbox.max_x = bbox.max_x.max(cell.bbox.max_x);
-        bbox.max_y = bbox.max_y.max(cell.bbox.max_y);
-
         write_u64(&mut writer, cell.cell_id)?;
         write_u16(&mut writer, cell.class_id)?;
         write_u16(
@@ -693,15 +651,7 @@ fn encode_chunk(
         }
     }
 
-    let byte_size = writer.len() as u64;
-    Ok((
-        writer,
-        ChunkStats {
-            polygon_vertex_count,
-            byte_size,
-            bbox,
-        },
-    ))
+    Ok(writer)
 }
 
 impl InMemoryCells {

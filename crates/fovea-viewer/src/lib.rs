@@ -793,9 +793,6 @@ struct CellChunkManifest {
     y: u32,
     path: String,
     cell_count: u32,
-    #[allow(dead_code)]
-    polygon_vertex_count: u32,
-    byte_size: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -805,7 +802,6 @@ struct OverlayChunkRequest {
     y: u32,
     path: String,
     cell_count: u32,
-    byte_size: u64,
     priority: f64,
 }
 
@@ -1049,7 +1045,6 @@ impl CellOverlayManifest {
                     id,
                     path: chunk.path.clone(),
                     cell_count: chunk.cell_count,
-                    byte_size: chunk.byte_size,
                     distance,
                 });
             }
@@ -1079,7 +1074,6 @@ struct VisibleOverlayChunk {
     id: OverlayChunkId,
     path: String,
     cell_count: u32,
-    byte_size: u64,
     distance: f64,
 }
 
@@ -1725,7 +1719,6 @@ impl Renderer {
                 y: visible.id.y,
                 path: visible.path,
                 cell_count: visible.cell_count,
-                byte_size: visible.byte_size,
                 priority: visible.distance,
             });
         }
@@ -3738,8 +3731,7 @@ mod tests {
                         "height": 512,
                         "downsample": 1.0,
                         "tile_cols": 2,
-                        "tile_rows": 2,
-                        "tile_count": 4
+                        "tile_rows": 2
                     }
                 ],
                 "tiles": [

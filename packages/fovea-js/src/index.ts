@@ -101,7 +101,6 @@ interface CellChunkRequest {
   y: number;
   path: string;
   cellCount: number;
-  byteSize: number;
   priority: number;
 }
 

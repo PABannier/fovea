@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use image::RgbaImage;
 use openslide_rs::{Address, OpenSlide, Region, Size as OpenSlideSize};
 
-use crate::manifest::{Bounds, Metadata, Size};
+use crate::manifest::Size;
 
 pub trait SlideReader: Send + Sync {
     fn dimensions(&self) -> Result<Size>;
@@ -30,25 +30,6 @@ pub struct SlideProperties {
 }
 
 impl SlideProperties {
-    pub fn metadata(&self) -> Metadata {
-        Metadata {
-            vendor: self.get_string("openslide.vendor"),
-            mpp_x: self.get_f64("openslide.mpp-x"),
-            mpp_y: self.get_f64("openslide.mpp-y"),
-            objective_power: self
-                .get_f64("openslide.objective-power")
-                .or_else(|| self.get_f64("aperio.AppMag")),
-            background_color: self.get_string("openslide.background-color"),
-            bounds: Bounds {
-                x: self.get_i64("openslide.bounds-x"),
-                y: self.get_i64("openslide.bounds-y"),
-                width: self.get_u32("openslide.bounds-width"),
-                height: self.get_u32("openslide.bounds-height"),
-            },
-            raw_properties: self.raw.clone(),
-        }
-    }
-
     pub fn background_rgb(&self) -> [u8; 3] {
         self.get_string("openslide.background-color")
             .and_then(|value| parse_hex_rgb(&value))
@@ -60,18 +41,6 @@ impl SlideProperties {
             .get(name)
             .cloned()
             .filter(|value| !value.is_empty())
-    }
-
-    fn get_f64(&self, name: &str) -> Option<f64> {
-        self.raw.get(name).and_then(|value| value.parse().ok())
-    }
-
-    fn get_i64(&self, name: &str) -> Option<i64> {
-        self.raw.get(name).and_then(|value| value.parse().ok())
-    }
-
-    fn get_u32(&self, name: &str) -> Option<u32> {
-        self.raw.get(name).and_then(|value| value.parse().ok())
     }
 }
 
@@ -187,31 +156,4 @@ fn parse_hex_rgb(value: &str) -> Option<[u8; 3]> {
         u8::from_str_radix(&value[2..4], 16).ok()?,
         u8::from_str_radix(&value[4..6], 16).ok()?,
     ])
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::SlideProperties;
-
-    #[test]
-    fn extracts_common_metadata() {
-        let raw = BTreeMap::from([
-            ("openslide.vendor".to_string(), "aperio".to_string()),
-            ("openslide.mpp-x".to_string(), "0.25".to_string()),
-            ("openslide.mpp-y".to_string(), "0.26".to_string()),
-            ("aperio.AppMag".to_string(), "40".to_string()),
-            ("openslide.bounds-x".to_string(), "10".to_string()),
-            ("openslide.bounds-width".to_string(), "2048".to_string()),
-        ]);
-        let metadata = SlideProperties { raw }.metadata();
-
-        assert_eq!(metadata.vendor.as_deref(), Some("aperio"));
-        assert_eq!(metadata.mpp_x, Some(0.25));
-        assert_eq!(metadata.mpp_y, Some(0.26));
-        assert_eq!(metadata.objective_power, Some(40.0));
-        assert_eq!(metadata.bounds.x, Some(10));
-        assert_eq!(metadata.bounds.width, Some(2048));
-    }
 }
