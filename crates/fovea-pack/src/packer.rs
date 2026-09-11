@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 use crate::{
-    manifest::{ImageFormat, LevelManifest, Manifest, Size, TileManifest},
+    manifest::{ImageFormat, LevelManifest, Manifest, Size},
     reader::SlideReader,
 };
 
@@ -31,27 +31,6 @@ pub fn build_slide_manifest(
     let metadata = properties.metadata();
     let levels = collect_levels(reader, tile_size)?;
     let consistency_error = coordinate_consistency_max_error(&levels, dimensions);
-    let mut tiles = Vec::new();
-    let extension = image_format.extension();
-
-    for level in &levels {
-        for y in 0..level.tile_rows {
-            for x in 0..level.tile_cols {
-                let level_x = x * tile_size;
-                let level_y = y * tile_size;
-                tiles.push(TileManifest {
-                    level: level.index,
-                    x,
-                    y,
-                    width: tile_size.min(level.width - level_x),
-                    height: tile_size.min(level.height - level_y),
-                    path: format!("images/level_{}/{}_{}.{}", level.index, x, y, extension),
-                    byte_size: 0,
-                    skipped: false,
-                });
-            }
-        }
-    }
 
     Ok(Manifest {
         schema: "fovea.slide".to_string(),
@@ -61,7 +40,6 @@ pub fn build_slide_manifest(
         width: dimensions.width,
         height: dimensions.height,
         levels,
-        tiles,
         associated_images: Vec::new(),
         metadata,
         coordinate_consistency_max_error_px: consistency_error,

@@ -689,8 +689,8 @@ struct RawManifest {
     tile_size: u32,
     width: u32,
     height: u32,
+    image_format: String,
     levels: Vec<LevelManifest>,
-    tiles: Vec<TileManifest>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -703,15 +703,19 @@ struct LevelManifest {
     tile_rows: u32,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-struct TileManifest {
-    level: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    path: String,
-    skipped: bool,
+impl LevelManifest {
+    /// Pixel size of tile (x, y) at this level, clipped at the right/bottom edge, or `None` when
+    /// the tile is outside the level's grid.
+    fn tile_dimensions(&self, tile_size: u32, x: u32, y: u32) -> Option<(u32, u32)> {
+        if x >= self.tile_cols || y >= self.tile_rows {
+            return None;
+        }
+
+        Some((
+            tile_size.min(self.width.saturating_sub(x * tile_size)),
+            tile_size.min(self.height.saturating_sub(y * tile_size)),
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -722,7 +726,6 @@ struct RawHeatmapManifest {
     height: u32,
     tile_size: u32,
     levels: Vec<HeatmapLevelManifest>,
-    tiles: Vec<HeatmapTileManifest>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -734,18 +737,6 @@ struct HeatmapLevelManifest {
     downsample: f64,
     tile_cols: u32,
     tile_rows: u32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HeatmapTileManifest {
-    level: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    path: String,
-    byte_size: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -842,25 +833,12 @@ struct HeatmapManifest {
     height: f64,
     tile_size: u32,
     levels: Vec<LevelManifest>,
-    tiles: HashMap<TileId, HeatmapTileManifest>,
 }
 
 impl HeatmapManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawHeatmapManifest = serde_json::from_str(manifest_json)
             .map_err(|err| js_error(format!("failed to parse heatmap manifest: {err}")))?;
-        let mut tiles = HashMap::new();
-
-        for tile in raw.tiles {
-            tiles.insert(
-                TileId {
-                    level: tile.level,
-                    x: tile.x,
-                    y: tile.y,
-                },
-                tile,
-            );
-        }
 
         if raw.levels.is_empty() {
             return Err(js_error("heatmap manifest has no pyramid levels"));
@@ -885,7 +863,6 @@ impl HeatmapManifest {
             height: raw.height as f64,
             tile_size: raw.tile_size,
             levels,
-            tiles,
         })
     }
 
@@ -941,10 +918,9 @@ impl HeatmapManifest {
                     x,
                     y,
                 };
-                let Some(tile) = self.tiles.get(&id) else {
+                let Some(rect) = self.tile_world_rect(level, id) else {
                     continue;
                 };
-                let rect = self.tile_world_rect(level, tile);
                 let tile_center = rect.center();
                 let distance =
                     (tile_center.0 - center.0).powi(2) + (tile_center.1 - center.1).powi(2);
@@ -961,19 +937,26 @@ impl HeatmapManifest {
         tiles
     }
 
-    fn tile_world_rect(&self, level: &LevelManifest, tile: &HeatmapTileManifest) -> Rect {
-        let x = f64::from(tile.x * self.tile_size) * level.downsample;
-        let y = f64::from(tile.y * self.tile_size) * level.downsample;
-        let width = f64::from(tile.width) * level.downsample;
-        let height = f64::from(tile.height) * level.downsample;
+    fn tile_world_rect(&self, level: &LevelManifest, id: TileId) -> Option<Rect> {
+        let (width, height) = level.tile_dimensions(self.tile_size, id.x, id.y)?;
+        let x = f64::from(id.x * self.tile_size) * level.downsample;
+        let y = f64::from(id.y * self.tile_size) * level.downsample;
+        let width = f64::from(width) * level.downsample;
+        let height = f64::from(height) * level.downsample;
 
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
-        .clamped(self.width, self.height)
+        Some(
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            }
+            .clamped(self.width, self.height),
+        )
+    }
+
+    fn tile_path(&self, id: TileId) -> String {
+        format!("tiles/{}/{}_{}.fovh", id.level, id.x, id.y)
     }
 }
 
@@ -1089,29 +1072,13 @@ struct SlideManifest {
     width: f64,
     height: f64,
     levels: Vec<LevelManifest>,
-    tiles: HashMap<TileId, TileManifest>,
+    tile_extension: String,
 }
 
 impl SlideManifest {
     fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawManifest = serde_json::from_str(manifest_json)
             .map_err(|err| js_error(format!("failed to parse manifest: {err}")))?;
-        let mut tiles = HashMap::new();
-
-        for tile in raw.tiles {
-            if tile.skipped {
-                continue;
-            }
-
-            tiles.insert(
-                TileId {
-                    level: tile.level,
-                    x: tile.x,
-                    y: tile.y,
-                },
-                tile,
-            );
-        }
 
         if raw.levels.is_empty() {
             return Err(js_error("manifest has no pyramid levels"));
@@ -1122,7 +1089,12 @@ impl SlideManifest {
             width: raw.width as f64,
             height: raw.height as f64,
             levels: raw.levels,
-            tiles,
+            // Mirrors `ImageFormat::extension` in fovea-pack.
+            tile_extension: if raw.image_format == "jpeg" {
+                "jpg".to_string()
+            } else {
+                raw.image_format
+            },
         })
     }
 
@@ -1178,10 +1150,9 @@ impl SlideManifest {
                     x,
                     y,
                 };
-                let Some(tile) = self.tiles.get(&id) else {
+                let Some(rect) = self.tile_world_rect(level, id) else {
                     continue;
                 };
-                let rect = self.tile_world_rect(level, tile);
                 let tile_center = rect.center();
                 let distance =
                     (tile_center.0 - center.0).powi(2) + (tile_center.1 - center.1).powi(2);
@@ -1198,19 +1169,29 @@ impl SlideManifest {
         tiles
     }
 
-    fn tile_world_rect(&self, level: &LevelManifest, tile: &TileManifest) -> Rect {
-        let x = f64::from(tile.x * self.tile_size) * level.downsample;
-        let y = f64::from(tile.y * self.tile_size) * level.downsample;
-        let width = f64::from(tile.width) * level.downsample;
-        let height = f64::from(tile.height) * level.downsample;
+    fn tile_world_rect(&self, level: &LevelManifest, id: TileId) -> Option<Rect> {
+        let (width, height) = level.tile_dimensions(self.tile_size, id.x, id.y)?;
+        let x = f64::from(id.x * self.tile_size) * level.downsample;
+        let y = f64::from(id.y * self.tile_size) * level.downsample;
+        let width = f64::from(width) * level.downsample;
+        let height = f64::from(height) * level.downsample;
 
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
-        .clamped(self.width, self.height)
+        Some(
+            Rect {
+                x,
+                y,
+                width,
+                height,
+            }
+            .clamped(self.width, self.height),
+        )
+    }
+
+    fn tile_path(&self, id: TileId) -> String {
+        format!(
+            "images/level_{}/{}_{}.{}",
+            id.level, id.x, id.y, self.tile_extension
+        )
     }
 }
 
@@ -1641,14 +1622,16 @@ impl Renderer {
                     continue;
                 }
 
-                if let Some(tile) = manifest.tiles.get(&visible.id) {
+                if let Some((width, height)) =
+                    level.tile_dimensions(manifest.tile_size, visible.id.x, visible.id.y)
+                {
                     requests.push(TileRequest {
                         level: visible.id.level,
                         x: visible.id.x,
                         y: visible.id.y,
-                        width: tile.width,
-                        height: tile.height,
-                        path: tile.path.clone(),
+                        width,
+                        height,
+                        path: manifest.tile_path(visible.id),
                         priority: level_bias + visible.distance,
                     });
                 }
@@ -1675,7 +1658,11 @@ impl Renderer {
             return Ok(());
         };
 
-        if !manifest.tiles.contains_key(&id) {
+        if manifest
+            .level(id.level)
+            .and_then(|level| level.tile_dimensions(manifest.tile_size, id.x, id.y))
+            .is_none()
+        {
             return Ok(());
         }
 
@@ -1785,15 +1772,18 @@ impl Renderer {
                     continue;
                 }
 
-                if let Some(tile) = manifest.tiles.get(&visible.id) {
+                if let Some((width, height)) =
+                    level.tile_dimensions(manifest.tile_size, visible.id.x, visible.id.y)
+                {
                     requests.push(HeatmapTileRequest {
                         level: visible.id.level,
                         x: visible.id.x,
                         y: visible.id.y,
-                        width: tile.width,
-                        height: tile.height,
-                        path: tile.path.clone(),
-                        byte_size: tile.byte_size,
+                        width,
+                        height,
+                        path: manifest.tile_path(visible.id),
+                        // FOVH tiles are one byte per pixel.
+                        byte_size: u64::from(width) * u64::from(height),
                         priority: level_bias + visible.distance,
                     });
                 }
@@ -1820,7 +1810,13 @@ impl Renderer {
             return Ok(());
         };
 
-        if !manifest.tiles.contains_key(&id) {
+        if manifest
+            .levels
+            .iter()
+            .find(|level| level.index == id.level)
+            .and_then(|level| level.tile_dimensions(manifest.tile_size, id.x, id.y))
+            .is_none()
+        {
             return Ok(());
         }
 
@@ -2408,8 +2404,7 @@ impl Renderer {
                 continue;
             }
 
-            let tile = manifest.tiles.get(&id)?;
-            let parent_rect = manifest.tile_world_rect(level, tile);
+            let parent_rect = manifest.tile_world_rect(level, id)?;
             let uv = UvRect {
                 u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
                 v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
@@ -2456,8 +2451,7 @@ impl Renderer {
                 continue;
             }
 
-            let tile = manifest.tiles.get(&id)?;
-            let parent_rect = manifest.tile_world_rect(level, tile);
+            let parent_rect = manifest.tile_world_rect(level, id)?;
             let uv = UvRect {
                 u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
                 v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
@@ -3251,8 +3245,7 @@ fn eviction_score(
     let distance = manifest
         .and_then(|manifest| {
             let level = manifest.level(id.level)?;
-            let tile = manifest.tiles.get(&id)?;
-            let rect = manifest.tile_world_rect(level, tile);
+            let rect = manifest.tile_world_rect(level, id)?;
             let center = rect.center();
             Some((center.0 - camera.center_x).powi(2) + (center.1 - camera.center_y).powi(2))
         })
@@ -3717,8 +3710,8 @@ mod tests {
             "tile_size": 256,
             "width": 1024,
             "height": 768,
-            "levels": [],
-            "tiles": []
+            "image_format": "webp",
+            "levels": []
         }"#;
 
         assert!(SlideManifest::from_json(manifest).is_err());
@@ -3731,6 +3724,7 @@ mod tests {
                 "tile_size": 256,
                 "width": 512,
                 "height": 512,
+                "image_format": "webp",
                 "levels": [
                     {
                         "index": 0,
@@ -3741,12 +3735,6 @@ mod tests {
                         "tile_rows": 2,
                         "tile_count": 4
                     }
-                ],
-                "tiles": [
-                    {"level":0,"x":0,"y":0,"width":256,"height":256,"path":"0_0.webp","byte_size":1,"skipped":false},
-                    {"level":0,"x":1,"y":0,"width":256,"height":256,"path":"1_0.webp","byte_size":1,"skipped":false},
-                    {"level":0,"x":0,"y":1,"width":256,"height":256,"path":"0_1.webp","byte_size":1,"skipped":false},
-                    {"level":0,"x":1,"y":1,"width":256,"height":256,"path":"1_1.webp","byte_size":1,"skipped":false}
                 ]
             }"#,
         )
@@ -3773,7 +3761,7 @@ mod tests {
     }
 
     #[test]
-    fn heatmap_manifest_accepts_camel_case_tiles() {
+    fn heatmap_manifest_accepts_camel_case_fields() {
         let manifest = HeatmapManifest::from_json(
             r#"{
                 "id": "density",
@@ -3789,24 +3777,92 @@ mod tests {
                         "tileCols": 1,
                         "tileRows": 1
                     }
-                ],
-                "tiles": [
-                    {
-                        "level": 0,
-                        "x": 0,
-                        "y": 0,
-                        "width": 8,
-                        "height": 6,
-                        "path": "tiles/0/0_0.fovh",
-                        "byteSize": 48
-                    }
                 ]
             }"#,
         )
         .expect("heatmap manifest parses");
 
         assert_eq!(manifest.tile_size, 256);
-        assert_eq!(manifest.tiles.len(), 1);
+        assert_eq!(manifest.levels[0].tile_cols, 1);
+    }
+
+    #[test]
+    fn derived_tiles_clip_edges_and_build_paths() {
+        let manifest = SlideManifest::from_json(
+            r#"{
+                "tile_size": 256,
+                "width": 1000,
+                "height": 600,
+                "image_format": "jpeg",
+                "levels": [
+                    {"index": 0, "width": 1000, "height": 600, "downsample": 1.0, "tile_cols": 4, "tile_rows": 3},
+                    {"index": 1, "width": 500, "height": 300, "downsample": 2.0, "tile_cols": 2, "tile_rows": 2}
+                ]
+            }"#,
+        )
+        .expect("manifest parses");
+        let level0 = manifest.level(0).expect("level 0 exists");
+        let level1 = manifest.level(1).expect("level 1 exists");
+
+        assert_eq!(level0.tile_dimensions(256, 0, 0), Some((256, 256)));
+        assert_eq!(level0.tile_dimensions(256, 3, 2), Some((232, 88)));
+        assert_eq!(level0.tile_dimensions(256, 4, 0), None);
+        assert_eq!(level0.tile_dimensions(256, 0, 3), None);
+        assert_eq!(
+            manifest.tile_path(TileId {
+                level: 1,
+                x: 1,
+                y: 1
+            }),
+            "images/level_1/1_1.jpg"
+        );
+
+        let rect = manifest
+            .tile_world_rect(
+                level1,
+                TileId {
+                    level: 1,
+                    x: 1,
+                    y: 1,
+                },
+            )
+            .expect("edge tile exists");
+        assert_close(rect.x, 512.0, EPSILON);
+        assert_close(rect.y, 512.0, EPSILON);
+        assert_close(rect.width, 488.0, EPSILON);
+        assert_close(rect.height, 88.0, EPSILON);
+        assert!(manifest
+            .tile_world_rect(
+                level1,
+                TileId {
+                    level: 1,
+                    x: 2,
+                    y: 0
+                }
+            )
+            .is_none());
+
+        let heatmap = HeatmapManifest::from_json(
+            r#"{
+                "id": "density",
+                "width": 1000,
+                "height": 600,
+                "tileSize": 256,
+                "levels": [
+                    {"index": 0, "width": 8, "height": 5, "downsample": 128.0, "tileCols": 1, "tileRows": 1}
+                ]
+            }"#,
+        )
+        .expect("heatmap manifest parses");
+        assert_eq!(heatmap.levels[0].tile_dimensions(256, 0, 0), Some((8, 5)));
+        assert_eq!(
+            heatmap.tile_path(TileId {
+                level: 0,
+                x: 0,
+                y: 0
+            }),
+            "tiles/0/0_0.fovh"
+        );
     }
 
     #[test]

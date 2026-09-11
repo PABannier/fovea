@@ -31,7 +31,6 @@ struct HeatmapManifest {
     value_min: f32,
     value_max: f32,
     levels: Vec<HeatmapLevelManifest>,
-    tiles: Vec<HeatmapTileManifest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,18 +43,6 @@ struct HeatmapLevelManifest {
     tile_cols: u32,
     tile_rows: u32,
     tile_count: u32,
-}
-
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HeatmapTileManifest {
-    level: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    path: String,
-    byte_size: u64,
 }
 
 #[derive(Clone)]
@@ -78,7 +65,7 @@ pub fn build_heatmap_from_cells(
         .flat_map(|level| level.values.iter().copied())
         .fold(0.0_f32, f32::max)
         .max(1.0);
-    let (tile_manifests, tiles) = build_heatmap_tiles(&options, &levels, value_max);
+    let tiles = build_heatmap_tiles(&options, &levels, value_max);
     let level_manifests = levels
         .drain(..)
         .map(|level| {
@@ -106,7 +93,6 @@ pub fn build_heatmap_from_cells(
         value_min: 0.0,
         value_max,
         levels: level_manifests,
-        tiles: tile_manifests,
     };
 
     Ok(InMemoryHeatmap {
@@ -204,13 +190,11 @@ fn downsample_level(previous: &HeatmapLevel) -> HeatmapLevel {
     }
 }
 
-#[allow(clippy::type_complexity)]
 fn build_heatmap_tiles(
     options: &HeatmapBuildOptions,
     levels: &[HeatmapLevel],
     value_max: f32,
-) -> (Vec<HeatmapTileManifest>, HashMap<(u32, u32, u32), Vec<u8>>) {
-    let mut manifests = Vec::new();
+) -> HashMap<(u32, u32, u32), Vec<u8>> {
     let mut tiles = HashMap::new();
 
     for level in levels {
@@ -219,28 +203,14 @@ fn build_heatmap_tiles(
 
         for tile_y in 0..tile_rows {
             for tile_x in 0..tile_cols {
-                let tile_width = (level.width - tile_x * options.tile_size).min(options.tile_size);
-                let tile_height =
-                    (level.height - tile_y * options.tile_size).min(options.tile_size);
-                let file_name = format!("{tile_x}_{tile_y}.fovh");
                 let bytes =
                     encode_heatmap_tile(level, tile_x, tile_y, options.tile_size, value_max);
-
-                manifests.push(HeatmapTileManifest {
-                    level: level.index,
-                    x: tile_x,
-                    y: tile_y,
-                    width: tile_width,
-                    height: tile_height,
-                    path: format!("tiles/{}/{file_name}", level.index),
-                    byte_size: bytes.len() as u64,
-                });
                 tiles.insert((level.index, tile_x, tile_y), bytes);
             }
         }
     }
 
-    (manifests, tiles)
+    tiles
 }
 
 fn encode_heatmap_tile(

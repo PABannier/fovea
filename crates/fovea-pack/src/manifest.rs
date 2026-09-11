@@ -75,18 +75,6 @@ pub struct LevelManifest {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct TileManifest {
-    pub level: u32,
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-    pub path: String,
-    pub byte_size: u64,
-    pub skipped: bool,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AssociatedImageManifest {
     pub name: String,
     pub width: u32,
@@ -103,7 +91,6 @@ pub struct Manifest {
     pub width: u32,
     pub height: u32,
     pub levels: Vec<LevelManifest>,
-    pub tiles: Vec<TileManifest>,
     pub associated_images: Vec<AssociatedImageManifest>,
     pub metadata: Metadata,
     pub coordinate_consistency_max_error_px: f64,
