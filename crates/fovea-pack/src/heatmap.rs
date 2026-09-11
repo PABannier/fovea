@@ -3,8 +3,6 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use serde::Serialize;
 
-use crate::cells::InMemoryCells;
-
 #[derive(Clone, Debug)]
 pub struct HeatmapBuildOptions {
     pub id: String,
@@ -67,12 +65,14 @@ struct HeatmapLevel {
     values: Vec<f32>,
 }
 
-pub fn build_heatmap_from_cells(
-    cells: &InMemoryCells,
+pub fn build_heatmap_from_centroids(
+    centroids: &[(f32, f32)],
+    width: u32,
+    height: u32,
     options: HeatmapBuildOptions,
 ) -> Result<InMemoryHeatmap> {
     validate_build_options(&options)?;
-    let mut levels = build_density_levels(&options, cells)?;
+    let mut levels = build_density_levels(&options, centroids, width, height);
     let value_max = levels
         .iter()
         .flat_map(|level| level.values.iter().copied())
@@ -100,8 +100,8 @@ pub fn build_heatmap_from_cells(
         version: env!("CARGO_PKG_VERSION").to_string(),
         id: options.id,
         source_format: "fovea.cell centroid density".to_string(),
-        width: cells.width(),
-        height: cells.height(),
+        width,
+        height,
         tile_size: options.tile_size,
         value_min: 0.0,
         value_max,
@@ -117,10 +117,12 @@ pub fn build_heatmap_from_cells(
 
 fn build_density_levels(
     options: &HeatmapBuildOptions,
-    cells: &InMemoryCells,
-) -> Result<Vec<HeatmapLevel>> {
-    let width = cells.width().div_ceil(options.bin_size).max(1);
-    let height = cells.height().div_ceil(options.bin_size).max(1);
+    centroids: &[(f32, f32)],
+    width: u32,
+    height: u32,
+) -> Vec<HeatmapLevel> {
+    let width = width.div_ceil(options.bin_size).max(1);
+    let height = height.div_ceil(options.bin_size).max(1);
     let mut base = HeatmapLevel {
         index: 0,
         width,
@@ -128,31 +130,18 @@ fn build_density_levels(
         downsample: f64::from(options.bin_size),
         values: vec![0.0; width as usize * height as usize],
     };
-    let mut cell_count = 0_u64;
 
-    for chunk in cells.chunks() {
-        let Some(bytes) = cells.chunks.get(&(chunk.x, chunk.y)) else {
-            continue;
-        };
-        let centroids = read_cell_chunk_centroids(
-            bytes,
-            chunk.x,
-            chunk.y,
-            cells.chunk_width(),
-            cells.chunk_height(),
-        )?;
-
-        for centroid in centroids {
-            let x = (centroid.0.max(0.0) as u32 / options.bin_size).min(width - 1);
-            let y = (centroid.1.max(0.0) as u32 / options.bin_size).min(height - 1);
-            base.values[y as usize * width as usize + x as usize] += 1.0;
-            cell_count += 1;
-        }
+    for centroid in centroids {
+        let x = (centroid.0.max(0.0) as u32 / options.bin_size).min(width - 1);
+        let y = (centroid.1.max(0.0) as u32 / options.bin_size).min(height - 1);
+        base.values[y as usize * width as usize + x as usize] += 1.0;
     }
 
     eprintln!(
-        "fovea-pack: binned {cell_count} cell centroids into {}x{} in-memory heatmap",
-        width, height
+        "fovea-pack: binned {} cell centroids into {}x{} in-memory heatmap",
+        centroids.len(),
+        width,
+        height
     );
 
     let mut levels = vec![base];
@@ -165,7 +154,7 @@ fn build_density_levels(
         levels.push(downsample_level(previous));
     }
 
-    Ok(levels)
+    levels
 }
 
 fn downsample_level(previous: &HeatmapLevel) -> HeatmapLevel {
@@ -267,116 +256,6 @@ fn encode_heatmap_tile(
     bytes
 }
 
-fn read_cell_chunk_centroids(
-    bytes: &[u8],
-    expected_x: u32,
-    expected_y: u32,
-    chunk_width: u32,
-    chunk_height: u32,
-) -> Result<Vec<(f32, f32)>> {
-    let mut reader = ByteReader::new(bytes);
-
-    if reader.read_bytes(4)? != b"FOVC" {
-        return Err(anyhow!("cell chunk has invalid magic"));
-    }
-
-    let version = reader.read_u32()?;
-    if version != 1 {
-        return Err(anyhow!("cell chunk has unsupported version {version}"));
-    }
-
-    let chunk_x = reader.read_u32()?;
-    let chunk_y = reader.read_u32()?;
-    if chunk_x != expected_x || chunk_y != expected_y {
-        return Err(anyhow!("cell chunk coordinates do not match manifest"));
-    }
-
-    let origin_x = reader.read_f32()?;
-    let origin_y = reader.read_f32()?;
-    let encoded_width = reader.read_f32()?;
-    let encoded_height = reader.read_f32()?;
-    let cell_count = reader.read_u32()? as usize;
-    let _polygon_vertex_count = reader.read_u32()?;
-    let width = if encoded_width > 0.0 {
-        encoded_width
-    } else {
-        chunk_width as f32
-    };
-    let height = if encoded_height > 0.0 {
-        encoded_height
-    } else {
-        chunk_height as f32
-    };
-    let mut centroids = Vec::with_capacity(cell_count);
-
-    for _ in 0..cell_count {
-        let _cell_id = reader.read_u64()?;
-        let _class_id = reader.read_u16()?;
-        let _vertex_count = reader.read_u16()?;
-        let _confidence = reader.read_f32()?;
-        let centroid_x = reader.read_u16()?;
-        let centroid_y = reader.read_u16()?;
-        let _vertex_offset = reader.read_u32()?;
-        let _bbox_min_x = reader.read_u16()?;
-        let _bbox_min_y = reader.read_u16()?;
-        let _bbox_max_x = reader.read_u16()?;
-        let _bbox_max_y = reader.read_u16()?;
-
-        centroids.push((
-            dequantize(centroid_x, origin_x, width),
-            dequantize(centroid_y, origin_y, height),
-        ));
-    }
-
-    Ok(centroids)
-}
-
-fn dequantize(value: u16, origin: f32, size: f32) -> f32 {
-    origin + (f32::from(value) / f32::from(u16::MAX)) * size
-}
-
-struct ByteReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
-
-impl<'a> ByteReader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, offset: 0 }
-    }
-
-    fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
-        if self.offset + len > self.bytes.len() {
-            return Err(anyhow!("heatmap source chunk ended unexpectedly"));
-        }
-
-        let start = self.offset;
-        self.offset += len;
-        Ok(&self.bytes[start..self.offset])
-    }
-
-    fn read_u16(&mut self) -> Result<u16> {
-        let bytes = self.read_bytes(2)?;
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        let bytes = self.read_bytes(4)?;
-        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-    }
-
-    fn read_u64(&mut self) -> Result<u64> {
-        let bytes = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        ]))
-    }
-
-    fn read_f32(&mut self) -> Result<f32> {
-        Ok(f32::from_bits(self.read_u32()?))
-    }
-}
-
 fn validate_build_options(options: &HeatmapBuildOptions) -> Result<()> {
     if options.bin_size == 0 {
         return Err(anyhow!("heatmap bin size must be greater than zero"));
@@ -387,4 +266,35 @@ fn validate_build_options(options: &HeatmapBuildOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_density_levels, HeatmapBuildOptions};
+
+    #[test]
+    fn bins_centroids_and_clamps_to_edges() {
+        let options = HeatmapBuildOptions {
+            id: "test".to_string(),
+            bin_size: 128,
+            tile_size: 256,
+        };
+        // 300x200 px -> 3x2 bins.
+        let centroids = [
+            (0.0, 0.0),
+            (127.9, 127.9),
+            (128.0, 0.0),
+            (-5.0, 150.0),
+            (299.0, 199.0),
+            (10_000.0, 10_000.0),
+        ];
+        let levels = build_density_levels(&options, &centroids, 300, 200);
+
+        assert_eq!((levels[0].width, levels[0].height), (3, 2));
+        assert_eq!(levels[0].values, vec![2.0, 1.0, 0.0, 1.0, 0.0, 2.0]);
+        assert_eq!(
+            levels.last().map(|level| (level.width, level.height)),
+            Some((1, 1))
+        );
+    }
 }

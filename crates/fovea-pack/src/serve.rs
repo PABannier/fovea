@@ -18,7 +18,7 @@ use axum::{
 
 use crate::{
     cells::{load_cells_protobuf, CellLoadOptions, InMemoryCells},
-    heatmap::{build_heatmap_from_cells, HeatmapBuildOptions, InMemoryHeatmap},
+    heatmap::{build_heatmap_from_centroids, HeatmapBuildOptions, InMemoryHeatmap},
     manifest::{ImageFormat, Manifest},
     packer::{build_slide_manifest, encode_slide_tile, slide_tile_request},
     reader::{OpenSlideReader, SlideReader},
@@ -183,9 +183,9 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
     )?);
     let slide_manifest_json = Arc::new(serde_json::to_string_pretty(slide_manifest.as_ref())?);
 
-    let cells = if let Some(path) = &options.cells_protobuf_path {
+    let (cells, centroids) = if let Some(path) = &options.cells_protobuf_path {
         let start = Instant::now();
-        let cells = load_cells_protobuf(CellLoadOptions {
+        let (cells, centroids) = load_cells_protobuf(CellLoadOptions {
             proto_path: path.clone(),
             id: "cells".to_string(),
             chunk_size: options.chunk_size,
@@ -196,18 +196,19 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
             cells.chunks.len(),
             start.elapsed().as_secs_f64()
         );
-        Some(Arc::new(cells))
+        (Some(Arc::new(cells)), Some(centroids))
     } else {
-        None
+        (None, None)
     };
 
     let heatmap = if options.heatmap {
-        let cells = cells
-            .as_ref()
-            .expect("heatmap requires cells checked above");
+        // Moved in so the centroids are freed as soon as the heatmap is built.
+        let centroids = centroids.expect("heatmap requires cells checked above");
         let start = Instant::now();
-        let heatmap = build_heatmap_from_cells(
-            cells,
+        let heatmap = build_heatmap_from_centroids(
+            &centroids.points,
+            centroids.width,
+            centroids.height,
             HeatmapBuildOptions {
                 id: "cell_density".to_string(),
                 bin_size: options.heatmap_bin_size,

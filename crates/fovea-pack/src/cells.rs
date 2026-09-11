@@ -21,7 +21,15 @@ pub struct CellLoadOptions {
 pub struct InMemoryCells {
     pub manifest_json: String,
     pub chunks: HashMap<(u32, u32), Vec<u8>>,
-    pub(crate) manifest: CellManifest,
+}
+
+/// Exact cell centroids (slide pixels) and the cell layer size they span.
+/// Returned next to the chunks only to bin the density heatmap.
+#[derive(Clone, Debug)]
+pub struct CellCentroids {
+    pub width: u32,
+    pub height: u32,
+    pub points: Vec<(f32, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -126,7 +134,7 @@ pub(crate) struct ChunkBBoxManifest {
     pub(crate) max_y: f32,
 }
 
-pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<InMemoryCells> {
+pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<(InMemoryCells, CellCentroids)> {
     validate_load_options(&options)?;
     let bytes = fs::read(&options.proto_path)
         .with_context(|| format!("failed to read {}", options.proto_path.display()))?;
@@ -156,16 +164,23 @@ pub fn load_cells_protobuf(options: CellLoadOptions) -> Result<InMemoryCells> {
 struct PackedCells {
     manifest: CellManifest,
     chunks: HashMap<(u32, u32), Vec<u8>>,
+    centroids: Vec<(f32, f32)>,
 }
 
 impl PackedCells {
-    fn into_memory(self) -> Result<InMemoryCells> {
+    fn into_memory(self) -> Result<(InMemoryCells, CellCentroids)> {
         let manifest_json = serde_json::to_string_pretty(&self.manifest)?;
-        Ok(InMemoryCells {
-            manifest_json,
-            chunks: self.chunks,
-            manifest: self.manifest,
-        })
+        Ok((
+            InMemoryCells {
+                manifest_json,
+                chunks: self.chunks,
+            },
+            CellCentroids {
+                width: self.manifest.width,
+                height: self.manifest.height,
+                points: self.centroids,
+            },
+        ))
     }
 }
 
@@ -351,11 +366,13 @@ fn build_packed_cells(
     let chunk_rows = height.div_ceil(input.chunk_size);
     let mut chunk_manifests = Vec::with_capacity(chunks.len());
     let mut chunk_bytes = HashMap::with_capacity(chunks.len());
+    let mut centroids = Vec::new();
 
     for (key, cells) in chunks {
         let file_name = format!("{}_{}.fovc", key.x, key.y);
         let relative_path = format!("chunks/{file_name}");
         let (bytes, stats) = encode_chunk(key, input.chunk_size, &cells)?;
+        centroids.extend(cells.iter().map(|cell| (cell.centroid.x, cell.centroid.y)));
 
         chunk_manifests.push(CellChunkManifest {
             x: key.x,
@@ -399,6 +416,7 @@ fn build_packed_cells(
             chunks: chunk_manifests,
         },
         chunks: chunk_bytes,
+        centroids,
     })
 }
 
@@ -702,28 +720,6 @@ fn encode_chunk(
             bbox,
         },
     ))
-}
-
-impl InMemoryCells {
-    pub(crate) fn width(&self) -> u32 {
-        self.manifest.width
-    }
-
-    pub(crate) fn height(&self) -> u32 {
-        self.manifest.height
-    }
-
-    pub(crate) fn chunk_width(&self) -> u32 {
-        self.manifest.chunk_width
-    }
-
-    pub(crate) fn chunk_height(&self) -> u32 {
-        self.manifest.chunk_height
-    }
-
-    pub(crate) fn chunks(&self) -> &[CellChunkManifest] {
-        &self.manifest.chunks
-    }
 }
 
 fn quantize(value: f32, origin: f32, chunk_size: u32) -> u16 {
