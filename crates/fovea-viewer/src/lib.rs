@@ -285,9 +285,14 @@ impl FoveaViewer {
         self.renderer.set_cell_class_visibility(flags);
 
         // Drop a hover that now sits on a hidden class so the host clears its readout.
-        if let Some(class_id) = self.renderer.hovered_class_id() {
+        if let Some(class_id) = self
+            .renderer
+            .hovered_cell
+            .as_ref()
+            .map(|cell| cell.class_id)
+        {
             if !self.renderer.cell_class_visible(class_id) {
-                self.renderer.set_hovered_cell(None);
+                self.renderer.hovered_cell = None;
                 self.events.push(ViewerEvent::CellHover {
                     cell_id: None,
                     class_id: None,
@@ -362,23 +367,25 @@ impl FoveaViewer {
     pub fn hover_at(&mut self, screen_x: f64, screen_y: f64) {
         let hit = self.renderer.pick_cell(&self.camera, screen_x, screen_y);
 
-        if self.renderer.hovered_cell_id() == hit.as_ref().map(|cell| cell.cell_id) {
+        if self.renderer.hovered_cell.as_ref().map(|cell| cell.cell_id)
+            == hit.as_ref().map(|cell| cell.cell_id)
+        {
             return;
         }
 
-        self.renderer.set_hovered_cell(hit);
         self.events.push(ViewerEvent::CellHover {
-            cell_id: self.renderer.hovered_cell_id(),
-            class_id: self.renderer.hovered_class_id(),
-            slide_x: self.renderer.hovered_slide_position().map(|p| p.0),
-            slide_y: self.renderer.hovered_slide_position().map(|p| p.1),
+            cell_id: hit.as_ref().map(|cell| cell.cell_id),
+            class_id: hit.as_ref().map(|cell| cell.class_id),
+            slide_x: hit.as_ref().map(|cell| f64::from(cell.centroid[0])),
+            slide_y: hit.as_ref().map(|cell| f64::from(cell.centroid[1])),
         });
+        self.renderer.hovered_cell = hit;
     }
 
     #[wasm_bindgen(js_name = clickAt)]
     pub fn click_at(&mut self, screen_x: f64, screen_y: f64) {
         let hit = self.renderer.pick_cell(&self.camera, screen_x, screen_y);
-        self.renderer.set_selected_cell(hit.clone());
+        self.renderer.selected_cell = hit.clone();
         self.events.push(ViewerEvent::CellClick {
             cell_id: hit.as_ref().map(|cell| cell.cell_id),
             class_id: hit.as_ref().map(|cell| cell.class_id),
@@ -1895,28 +1902,6 @@ impl Renderer {
             "gray" | "grey" => 2.0,
             _ => 0.0,
         };
-    }
-
-    fn hovered_cell_id(&self) -> Option<u64> {
-        self.hovered_cell.as_ref().map(|cell| cell.cell_id)
-    }
-
-    fn hovered_class_id(&self) -> Option<u32> {
-        self.hovered_cell.as_ref().map(|cell| cell.class_id)
-    }
-
-    fn hovered_slide_position(&self) -> Option<(f64, f64)> {
-        self.hovered_cell
-            .as_ref()
-            .map(|cell| (f64::from(cell.centroid[0]), f64::from(cell.centroid[1])))
-    }
-
-    fn set_hovered_cell(&mut self, hit: Option<CellHit>) {
-        self.hovered_cell = hit;
-    }
-
-    fn set_selected_cell(&mut self, hit: Option<CellHit>) {
-        self.selected_cell = hit;
     }
 
     fn set_cell_class_colors(&mut self, rgba: &[f32]) {
