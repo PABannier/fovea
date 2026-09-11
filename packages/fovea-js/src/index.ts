@@ -86,56 +86,43 @@ type RawViewerEvent =
   | ({ type: "selection-change" } & SelectionChangeEvent)
   | ({ type: "viewport-changed" } & ViewportChangeEvent);
 
-interface TileRequest {
+/**
+ * A tile/chunk request from the wasm `visible*Requests` calls, already sorted by
+ * priority. Cell chunk requests only carry `x`, `y` and `path`.
+ */
+interface LayerRequest {
   level: number;
   x: number;
   y: number;
   width: number;
   height: number;
   path: string;
-  priority: number;
 }
 
-interface CellChunkRequest {
-  x: number;
-  y: number;
-  path: string;
-  cellCount: number;
-  byteSize: number;
-  priority: number;
-}
-
-interface HeatmapTileRequest {
-  level: number;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  path: string;
-  byteSize: number;
-  priority: number;
+/** Streaming state shared by the slide, cells and heatmap layers. */
+interface Layer {
+  readonly name: string;
+  version: number;
+  baseUrl: string | null;
+  readonly inflight: Map<string, AbortController>;
+  readonly maxConcurrent: number;
+  readonly requests: () => string;
+  readonly loadManifest: (json: string) => void;
+  readonly upload: (
+    request: LayerRequest,
+    response: Response,
+    isCurrent: () => boolean
+  ) => Promise<void>;
 }
 
 export class FoveaViewer {
   private animationFrame = 0;
   private destroyed = false;
-  private slideVersion = 0;
-  private cellsVersion = 0;
-  private heatmapVersion = 0;
-  private tileBaseUrl: string | null = null;
-  private cellsBaseUrl: string | null = null;
-  private heatmapBaseUrl: string | null = null;
   private lastPointer: PointerEvent | null = null;
   private pointerDown: { clientX: number; clientY: number } | null = null;
-  private readonly tileRequestBatchSize: number;
-  private readonly cellsRequestBatchSize: number;
-  private readonly heatmapRequestBatchSize: number;
-  private readonly maxConcurrentTileRequests: number;
-  private readonly maxConcurrentCellsRequests: number;
-  private readonly maxConcurrentHeatmapRequests: number;
-  private readonly inflightTiles = new Map<string, AbortController>();
-  private readonly inflightCellChunks = new Map<string, AbortController>();
-  private readonly inflightHeatmapTiles = new Map<string, AbortController>();
+  private readonly slide: Layer;
+  private readonly cells: Layer;
+  private readonly heatmap: Layer;
   private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
@@ -147,12 +134,85 @@ export class FoveaViewer {
     private readonly canvas: HTMLCanvasElement,
     options: FoveaViewerOptions
   ) {
-    this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
-    this.cellsRequestBatchSize = options.cellsRequestBatchSize ?? 64;
-    this.heatmapRequestBatchSize = options.heatmapRequestBatchSize ?? 64;
-    this.maxConcurrentTileRequests = options.maxConcurrentTileRequests ?? 8;
-    this.maxConcurrentCellsRequests = options.maxConcurrentCellsRequests ?? 6;
-    this.maxConcurrentHeatmapRequests = options.maxConcurrentHeatmapRequests ?? 6;
+    const tileBatch = options.tileRequestBatchSize ?? 96;
+    const cellsBatch = options.cellsRequestBatchSize ?? 64;
+    const heatmapBatch = options.heatmapRequestBatchSize ?? 64;
+    this.slide = {
+      name: "slide",
+      version: 0,
+      baseUrl: null,
+      inflight: new Map(),
+      maxConcurrent: options.maxConcurrentTileRequests ?? 8,
+      requests: () => wasm.visibleTileRequests(tileBatch),
+      loadManifest: (json) => wasm.loadManifest(json),
+      upload: async (request, response, isCurrent) => {
+        const blob = await response.blob();
+
+        if (!isCurrent()) {
+          return;
+        }
+
+        const bitmap = await createImageBitmap(blob);
+
+        try {
+          const rgba = decodeBitmapRgba(bitmap, request.width, request.height);
+
+          if (!isCurrent()) {
+            return;
+          }
+
+          wasm.uploadTileRgba(
+            request.level,
+            request.x,
+            request.y,
+            rgba.width,
+            rgba.height,
+            rgba.data
+          );
+        } finally {
+          bitmap.close();
+        }
+      }
+    };
+    this.cells = {
+      name: "cell",
+      version: 0,
+      baseUrl: null,
+      inflight: new Map(),
+      maxConcurrent: options.maxConcurrentCellsRequests ?? 6,
+      requests: () => wasm.visibleCellChunkRequests(cellsBatch),
+      loadManifest: (json) => wasm.loadCellManifest(json),
+      upload: async (request, response, isCurrent) => {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+
+        if (isCurrent()) {
+          wasm.uploadCellChunkBytes(request.x, request.y, bytes);
+        }
+      }
+    };
+    this.heatmap = {
+      name: "heatmap",
+      version: 0,
+      baseUrl: null,
+      inflight: new Map(),
+      maxConcurrent: options.maxConcurrentHeatmapRequests ?? 6,
+      requests: () => wasm.visibleHeatmapTileRequests(heatmapBatch),
+      loadManifest: (json) => wasm.loadHeatmapManifest(json),
+      upload: async (request, response, isCurrent) => {
+        const bytes = new Uint8Array(await response.arrayBuffer());
+
+        if (isCurrent()) {
+          wasm.uploadHeatmapTileBytes(
+            request.level,
+            request.x,
+            request.y,
+            request.width,
+            request.height,
+            bytes
+          );
+        }
+      }
+    };
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(canvas);
     this.bindInput();
@@ -197,9 +257,9 @@ export class FoveaViewer {
         return;
       }
 
-      this.pumpTileRequests();
-      this.pumpHeatmapRequests();
-      this.pumpCellRequests();
+      for (const layer of [this.slide, this.heatmap, this.cells]) {
+        this.pump(layer);
+      }
       const stats = this.wasm.render();
       this.dispatchDrainedEvents();
       this.observeFrame(stats);
@@ -219,78 +279,22 @@ export class FoveaViewer {
   destroy(): void {
     this.destroyed = true;
     this.stop();
-    this.abortInflightTiles();
-    this.abortInflightCellChunks();
-    this.abortInflightHeatmapTiles();
+    for (const layer of [this.slide, this.cells, this.heatmap]) {
+      abortInflight(layer);
+    }
     this.resizeObserver.disconnect();
   }
 
-  async loadSlide(slideUrl: string): Promise<void> {
-    const version = ++this.slideVersion;
-    this.abortInflightTiles();
-
-    const manifestUrl = manifestUrlForSource(slideUrl);
-    const response = await fetch(manifestUrl, { cache: "no-cache" });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch slide manifest: ${response.status} ${response.statusText}`);
-    }
-
-    const manifestJson = await response.text();
-
-    if (version !== this.slideVersion || this.destroyed) {
-      return;
-    }
-
-    this.tileBaseUrl = new URL(".", manifestUrl).toString();
-    this.wasm.loadManifest(manifestJson);
-    this.frameTimes.length = 0;
+  loadSlide(slideUrl: string): Promise<void> {
+    return this.loadLayer(this.slide, slideUrl);
   }
 
-  async loadCells(cellsUrl: string): Promise<void> {
-    const version = ++this.cellsVersion;
-    this.abortInflightCellChunks();
-
-    const manifestUrl = manifestUrlForSource(cellsUrl);
-    const response = await fetch(manifestUrl, { cache: "no-cache" });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch cell manifest: ${response.status} ${response.statusText}`);
-    }
-
-    const manifestJson = await response.text();
-
-    if (version !== this.cellsVersion || this.destroyed) {
-      return;
-    }
-
-    this.cellsBaseUrl = new URL(".", manifestUrl).toString();
-    this.wasm.loadCellManifest(manifestJson);
-    this.frameTimes.length = 0;
+  loadCells(cellsUrl: string): Promise<void> {
+    return this.loadLayer(this.cells, cellsUrl);
   }
 
-  async loadHeatmap(heatmapUrl: string): Promise<void> {
-    const version = ++this.heatmapVersion;
-    this.abortInflightHeatmapTiles();
-
-    const manifestUrl = manifestUrlForSource(heatmapUrl);
-    const response = await fetch(manifestUrl, { cache: "no-cache" });
-
-    if (!response.ok) {
-      throw new Error(
-        `Failed to fetch heatmap manifest: ${response.status} ${response.statusText}`
-      );
-    }
-
-    const manifestJson = await response.text();
-
-    if (version !== this.heatmapVersion || this.destroyed) {
-      return;
-    }
-
-    this.heatmapBaseUrl = new URL(".", manifestUrl).toString();
-    this.wasm.loadHeatmapManifest(manifestJson);
-    this.frameTimes.length = 0;
+  loadHeatmap(heatmapUrl: string): Promise<void> {
+    return this.loadLayer(this.heatmap, heatmapUrl);
   }
 
   setPointCount(count: BenchmarkPointCount): void {
@@ -446,9 +450,9 @@ export class FoveaViewer {
       cpuMemoryMbEstimate: bytesToMiB(cpuBytes),
       gpuBufferMemoryBytes: gpuBytes,
       cpuMemoryBytes: cpuBytes,
-      inflightTileRequests: this.inflightTiles.size,
-      inflightCellRequests: this.inflightCellChunks.size,
-      inflightHeatmapRequests: this.inflightHeatmapTiles.size
+      inflightTileRequests: this.slide.inflight.size,
+      inflightCellRequests: this.cells.inflight.size,
+      inflightHeatmapRequests: this.heatmap.inflight.size
     };
   }
 
@@ -545,281 +549,94 @@ export class FoveaViewer {
     };
   }
 
-  private pumpTileRequests(): void {
-    if (!this.tileBaseUrl || this.destroyed) {
-      return;
-    }
+  private async loadLayer(layer: Layer, url: string): Promise<void> {
+    const version = ++layer.version;
+    abortInflight(layer);
 
-    const requests = this.parseVisibleTileRequests();
-    const wanted = new Set(requests.map((request) => tileKey(request)));
-
-    for (const [key, controller] of this.inflightTiles) {
-      if (!wanted.has(key)) {
-        controller.abort();
-        this.inflightTiles.delete(key);
-      }
-    }
-
-    for (const request of requests) {
-      if (this.inflightTiles.size >= this.maxConcurrentTileRequests) {
-        break;
-      }
-
-      const key = tileKey(request);
-
-      if (this.inflightTiles.has(key)) {
-        continue;
-      }
-
-      const controller = new AbortController();
-      const version = this.slideVersion;
-      this.inflightTiles.set(key, controller);
-      void this.loadTile(request, controller, version)
-        .catch((error: unknown) => {
-          if (!controller.signal.aborted) {
-            console.error(error);
-          }
-        })
-        .finally(() => {
-          if (this.inflightTiles.get(key) === controller) {
-            this.inflightTiles.delete(key);
-          }
-        });
-    }
-  }
-
-  private parseVisibleTileRequests(): TileRequest[] {
-    const raw = this.wasm.visibleTileRequests(this.tileRequestBatchSize);
-
-    try {
-      const requests = JSON.parse(raw) as TileRequest[];
-      return requests.sort((a, b) => a.priority - b.priority);
-    } catch {
-      return [];
-    }
-  }
-
-  private pumpCellRequests(): void {
-    if (!this.cellsBaseUrl || this.destroyed) {
-      return;
-    }
-
-    const requests = this.parseVisibleCellChunkRequests();
-    const wanted = new Set(requests.map((request) => cellChunkKey(request)));
-
-    for (const [key, controller] of this.inflightCellChunks) {
-      if (!wanted.has(key)) {
-        controller.abort();
-        this.inflightCellChunks.delete(key);
-      }
-    }
-
-    for (const request of requests) {
-      if (this.inflightCellChunks.size >= this.maxConcurrentCellsRequests) {
-        break;
-      }
-
-      const key = cellChunkKey(request);
-
-      if (this.inflightCellChunks.has(key)) {
-        continue;
-      }
-
-      const controller = new AbortController();
-      const version = this.cellsVersion;
-      this.inflightCellChunks.set(key, controller);
-      void this.loadCellChunk(request, controller, version)
-        .catch((error: unknown) => {
-          if (!controller.signal.aborted) {
-            console.error(error);
-          }
-        })
-        .finally(() => {
-          if (this.inflightCellChunks.get(key) === controller) {
-            this.inflightCellChunks.delete(key);
-          }
-        });
-    }
-  }
-
-  private pumpHeatmapRequests(): void {
-    if (!this.heatmapBaseUrl || this.destroyed) {
-      return;
-    }
-
-    const requests = this.parseVisibleHeatmapTileRequests();
-    const wanted = new Set(requests.map((request) => heatmapTileKey(request)));
-
-    for (const [key, controller] of this.inflightHeatmapTiles) {
-      if (!wanted.has(key)) {
-        controller.abort();
-        this.inflightHeatmapTiles.delete(key);
-      }
-    }
-
-    for (const request of requests) {
-      if (this.inflightHeatmapTiles.size >= this.maxConcurrentHeatmapRequests) {
-        break;
-      }
-
-      const key = heatmapTileKey(request);
-
-      if (this.inflightHeatmapTiles.has(key)) {
-        continue;
-      }
-
-      const controller = new AbortController();
-      const version = this.heatmapVersion;
-      this.inflightHeatmapTiles.set(key, controller);
-      void this.loadHeatmapTile(request, controller, version)
-        .catch((error: unknown) => {
-          if (!controller.signal.aborted) {
-            console.error(error);
-          }
-        })
-        .finally(() => {
-          if (this.inflightHeatmapTiles.get(key) === controller) {
-            this.inflightHeatmapTiles.delete(key);
-          }
-        });
-    }
-  }
-
-  private parseVisibleHeatmapTileRequests(): HeatmapTileRequest[] {
-    const raw = this.wasm.visibleHeatmapTileRequests(this.heatmapRequestBatchSize);
-
-    try {
-      const requests = JSON.parse(raw) as HeatmapTileRequest[];
-      return requests.sort((a, b) => a.priority - b.priority);
-    } catch {
-      return [];
-    }
-  }
-
-  private async loadHeatmapTile(
-    request: HeatmapTileRequest,
-    controller: AbortController,
-    version: number
-  ): Promise<void> {
-    const heatmapBaseUrl = this.heatmapBaseUrl;
-
-    if (!heatmapBaseUrl) {
-      return;
-    }
-
-    const tileUrl = new URL(request.path, heatmapBaseUrl);
-    const response = await fetch(tileUrl, {
-      cache: "force-cache",
-      signal: controller.signal
-    });
+    const manifestUrl = manifestUrlForSource(url);
+    const response = await fetch(manifestUrl, { cache: "no-cache" });
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch heatmap tile ${request.path}: ${response.status}`);
-    }
-
-    const bytes = new Uint8Array(await response.arrayBuffer());
-
-    if (controller.signal.aborted || version !== this.heatmapVersion || this.destroyed) {
-      return;
-    }
-
-    this.wasm.uploadHeatmapTileBytes(
-      request.level,
-      request.x,
-      request.y,
-      request.width,
-      request.height,
-      bytes
-    );
-  }
-
-  private parseVisibleCellChunkRequests(): CellChunkRequest[] {
-    const raw = this.wasm.visibleCellChunkRequests(this.cellsRequestBatchSize);
-
-    try {
-      const requests = JSON.parse(raw) as CellChunkRequest[];
-      return requests.sort((a, b) => a.priority - b.priority);
-    } catch {
-      return [];
-    }
-  }
-
-  private async loadCellChunk(
-    request: CellChunkRequest,
-    controller: AbortController,
-    version: number
-  ): Promise<void> {
-    const cellsBaseUrl = this.cellsBaseUrl;
-
-    if (!cellsBaseUrl) {
-      return;
-    }
-
-    const chunkUrl = new URL(request.path, cellsBaseUrl);
-    const response = await fetch(chunkUrl, {
-      cache: "force-cache",
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch cell chunk ${request.path}: ${response.status}`);
-    }
-
-    const bytes = new Uint8Array(await response.arrayBuffer());
-
-    if (controller.signal.aborted || version !== this.cellsVersion || this.destroyed) {
-      return;
-    }
-
-    this.wasm.uploadCellChunkBytes(request.x, request.y, bytes);
-  }
-
-  private async loadTile(
-    request: TileRequest,
-    controller: AbortController,
-    version: number
-  ): Promise<void> {
-    const tileBaseUrl = this.tileBaseUrl;
-
-    if (!tileBaseUrl) {
-      return;
-    }
-
-    const tileUrl = new URL(request.path, tileBaseUrl);
-    const response = await fetch(tileUrl, {
-      cache: "force-cache",
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch tile ${request.path}: ${response.status}`);
-    }
-
-    const blob = await response.blob();
-
-    if (controller.signal.aborted || version !== this.slideVersion || this.destroyed) {
-      return;
-    }
-
-    const bitmap = await createImageBitmap(blob);
-
-    try {
-      const rgba = decodeBitmapRgba(bitmap, request.width, request.height);
-
-      if (controller.signal.aborted || version !== this.slideVersion || this.destroyed) {
-        return;
-      }
-
-      this.wasm.uploadTileRgba(
-        request.level,
-        request.x,
-        request.y,
-        rgba.width,
-        rgba.height,
-        rgba.data
+      throw new Error(
+        `Failed to fetch ${layer.name} manifest: ${response.status} ${response.statusText}`
       );
-    } finally {
-      bitmap.close();
+    }
+
+    const manifestJson = await response.text();
+
+    if (version !== layer.version || this.destroyed) {
+      return;
+    }
+
+    layer.baseUrl = new URL(".", manifestUrl).toString();
+    layer.loadManifest(manifestJson);
+    this.frameTimes.length = 0;
+  }
+
+  private pump(layer: Layer): void {
+    const baseUrl = layer.baseUrl;
+
+    if (!baseUrl || this.destroyed) {
+      return;
+    }
+
+    // Requests arrive priority-sorted from wasm.
+    const raw = layer.requests();
+    let requests: LayerRequest[];
+
+    try {
+      requests = JSON.parse(raw) as LayerRequest[];
+    } catch {
+      requests = [];
+    }
+
+    const wanted = new Set(requests.map(requestKey));
+
+    for (const [key, controller] of layer.inflight) {
+      if (!wanted.has(key)) {
+        controller.abort();
+        layer.inflight.delete(key);
+      }
+    }
+
+    for (const request of requests) {
+      if (layer.inflight.size >= layer.maxConcurrent) {
+        break;
+      }
+
+      const key = requestKey(request);
+
+      if (layer.inflight.has(key)) {
+        continue;
+      }
+
+      const controller = new AbortController();
+      const version = layer.version;
+      const isCurrent = () =>
+        !controller.signal.aborted && version === layer.version && !this.destroyed;
+      layer.inflight.set(key, controller);
+      void (async () => {
+        const response = await fetch(new URL(request.path, baseUrl), {
+          cache: "force-cache",
+          signal: controller.signal
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to fetch ${layer.name} data ${request.path}: ${response.status}`);
+        }
+
+        await layer.upload(request, response, isCurrent);
+      })()
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) {
+            console.error(error);
+          }
+        })
+        .finally(() => {
+          if (layer.inflight.get(key) === controller) {
+            layer.inflight.delete(key);
+          }
+        });
     }
   }
 
@@ -887,30 +704,6 @@ export class FoveaViewer {
       listener(event);
     }
   }
-
-  private abortInflightTiles(): void {
-    for (const controller of this.inflightTiles.values()) {
-      controller.abort();
-    }
-
-    this.inflightTiles.clear();
-  }
-
-  private abortInflightCellChunks(): void {
-    for (const controller of this.inflightCellChunks.values()) {
-      controller.abort();
-    }
-
-    this.inflightCellChunks.clear();
-  }
-
-  private abortInflightHeatmapTiles(): void {
-    for (const controller of this.inflightHeatmapTiles.values()) {
-      controller.abort();
-    }
-
-    this.inflightHeatmapTiles.clear();
-  }
 }
 
 export type { FrameStats };
@@ -939,16 +732,16 @@ function manifestUrlForSource(slideUrl: string): URL {
   return new URL(`${pathname}manifest.json${url.search}`, url);
 }
 
-function tileKey(request: TileRequest): string {
+function requestKey(request: LayerRequest): string {
   return `${request.level}/${request.x}/${request.y}`;
 }
 
-function cellChunkKey(request: CellChunkRequest): string {
-  return `${request.x}/${request.y}`;
-}
+function abortInflight(layer: Layer): void {
+  for (const controller of layer.inflight.values()) {
+    controller.abort();
+  }
 
-function heatmapTileKey(request: HeatmapTileRequest): string {
-  return `${request.level}/${request.x}/${request.y}`;
+  layer.inflight.clear();
 }
 
 function decodeBitmapRgba(
