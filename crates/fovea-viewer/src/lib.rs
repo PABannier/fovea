@@ -1470,17 +1470,72 @@ impl Renderer {
                 immediate_size: 0,
             });
 
-        let triangle_pipeline =
-            create_triangle_pipeline(&device, &triangle_pipeline_layout, &shader, format);
-        let tile_pipeline = create_tile_pipeline(&device, &tile_pipeline_layout, &shader, format);
-        let heatmap_pipeline =
-            create_heatmap_pipeline(&device, &tile_pipeline_layout, &shader, format);
-        let point_pipeline =
-            create_point_pipeline(&device, &point_pipeline_layout, &shader, format);
-        let overlay_point_pipeline =
-            create_overlay_point_pipeline(&device, &overlay_pipeline_layout, &shader, format);
-        let overlay_line_pipeline =
-            create_overlay_line_pipeline(&device, &overlay_pipeline_layout, &shader, format);
+        let triangle_pipeline = create_pipeline(
+            &device,
+            "fovea-triangle-pipeline",
+            &triangle_pipeline_layout,
+            &shader,
+            "vs_triangle",
+            "fs_triangle",
+            format,
+            &[],
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let tile_pipeline = create_pipeline(
+            &device,
+            "fovea-tile-pipeline",
+            &tile_pipeline_layout,
+            &shader,
+            "vs_tile",
+            "fs_tile",
+            format,
+            &[TileVertex::layout()],
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let heatmap_pipeline = create_pipeline(
+            &device,
+            "fovea-heatmap-pipeline",
+            &tile_pipeline_layout,
+            &shader,
+            "vs_tile",
+            "fs_heatmap",
+            format,
+            &[TileVertex::layout()],
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let point_pipeline = create_pipeline(
+            &device,
+            "fovea-point-pipeline",
+            &point_pipeline_layout,
+            &shader,
+            "vs_point",
+            "fs_point",
+            format,
+            &[PointVertex::layout()],
+            wgpu::PrimitiveTopology::PointList,
+        );
+        let overlay_point_pipeline = create_pipeline(
+            &device,
+            "fovea-overlay-point-pipeline",
+            &overlay_pipeline_layout,
+            &shader,
+            "vs_overlay_point",
+            "fs_point",
+            format,
+            &[OverlayPointVertex::layout()],
+            wgpu::PrimitiveTopology::TriangleList,
+        );
+        let overlay_line_pipeline = create_pipeline(
+            &device,
+            "fovea-overlay-line-pipeline",
+            &overlay_pipeline_layout,
+            &shader,
+            "vs_overlay_line",
+            "fs_point",
+            format,
+            &[OverlayStrokeVertex::layout()],
+            wgpu::PrimitiveTopology::TriangleList,
+        );
 
         Ok(Self {
             surface,
@@ -3275,120 +3330,6 @@ struct TextureEntry {
     height: u32,
     bytes: usize,
     last_used_frame: u64,
-}
-
-fn create_triangle_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-triangle-pipeline",
-        layout,
-        shader,
-        "vs_triangle",
-        "fs_triangle",
-        format,
-        &[],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
-fn create_tile_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-tile-pipeline",
-        layout,
-        shader,
-        "vs_tile",
-        "fs_tile",
-        format,
-        &[TileVertex::layout()],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
-fn create_heatmap_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-heatmap-pipeline",
-        layout,
-        shader,
-        "vs_tile",
-        "fs_heatmap",
-        format,
-        &[TileVertex::layout()],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
-fn create_point_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-point-pipeline",
-        layout,
-        shader,
-        "vs_point",
-        "fs_point",
-        format,
-        &[PointVertex::layout()],
-        wgpu::PrimitiveTopology::PointList,
-    )
-}
-
-fn create_overlay_point_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-overlay-point-pipeline",
-        layout,
-        shader,
-        "vs_overlay_point",
-        "fs_point",
-        format,
-        &[OverlayPointVertex::layout()],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
-fn create_overlay_line_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-overlay-line-pipeline",
-        layout,
-        shader,
-        "vs_overlay_line",
-        "fs_point",
-        format,
-        &[OverlayStrokeVertex::layout()],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
