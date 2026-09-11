@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    io::Write,
     path::PathBuf,
 };
 
@@ -355,7 +354,7 @@ fn build_packed_cells(
     for (key, cells) in chunks {
         let file_name = format!("{}_{}.fovc", key.x, key.y);
         let relative_path = format!("chunks/{file_name}");
-        let (bytes, stats) = encode_chunk(key, input.chunk_size, &cells)?;
+        let (bytes, stats) = encode_chunk(key, input.chunk_size, &cells);
 
         chunk_manifests.push(CellChunkManifest {
             x: key.x,
@@ -548,13 +547,11 @@ impl<'a> CellBlobReader<'a> {
     }
 
     fn read_u16(&mut self) -> Result<u16> {
-        let bytes = self.read_bytes(2)?;
-        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+        Ok(u16::from_le_bytes(self.read_bytes(2)?.try_into()?))
     }
 
     fn read_i16(&mut self) -> Result<i16> {
-        let bytes = self.read_bytes(2)?;
-        Ok(i16::from_le_bytes([bytes[0], bytes[1]]))
+        Ok(i16::from_le_bytes(self.read_bytes(2)?.try_into()?))
     }
 }
 
@@ -631,11 +628,7 @@ struct ChunkStats {
     bbox: BBox,
 }
 
-fn encode_chunk(
-    key: ChunkKey,
-    chunk_size: u32,
-    cells: &[CellRecord],
-) -> Result<(Vec<u8>, ChunkStats)> {
+fn encode_chunk(key: ChunkKey, chunk_size: u32, cells: &[CellRecord]) -> (Vec<u8>, ChunkStats) {
     let mut writer = Vec::new();
     let origin_x = (key.x * chunk_size) as f32;
     let origin_y = (key.y * chunk_size) as f32;
@@ -651,16 +644,16 @@ fn encode_chunk(
         max_y: f32::MIN,
     };
 
-    writer.write_all(b"FOVC")?;
-    write_u32(&mut writer, 1)?;
-    write_u32(&mut writer, key.x)?;
-    write_u32(&mut writer, key.y)?;
-    write_f32(&mut writer, origin_x)?;
-    write_f32(&mut writer, origin_y)?;
-    write_f32(&mut writer, chunk_size as f32)?;
-    write_f32(&mut writer, chunk_size as f32)?;
-    write_u32(&mut writer, cells.len().min(u32::MAX as usize) as u32)?;
-    write_u32(&mut writer, polygon_vertex_count)?;
+    writer.extend_from_slice(b"FOVC");
+    writer.extend_from_slice(&1_u32.to_le_bytes());
+    writer.extend_from_slice(&key.x.to_le_bytes());
+    writer.extend_from_slice(&key.y.to_le_bytes());
+    writer.extend_from_slice(&origin_x.to_le_bytes());
+    writer.extend_from_slice(&origin_y.to_le_bytes());
+    writer.extend_from_slice(&(chunk_size as f32).to_le_bytes());
+    writer.extend_from_slice(&(chunk_size as f32).to_le_bytes());
+    writer.extend_from_slice(&(cells.len().min(u32::MAX as usize) as u32).to_le_bytes());
+    writer.extend_from_slice(&polygon_vertex_count.to_le_bytes());
 
     let mut vertex_offset = 0_u32;
     for cell in cells {
@@ -669,39 +662,36 @@ fn encode_chunk(
         bbox.max_x = bbox.max_x.max(cell.bbox.max_x);
         bbox.max_y = bbox.max_y.max(cell.bbox.max_y);
 
-        write_u64(&mut writer, cell.cell_id)?;
-        write_u16(&mut writer, cell.class_id)?;
-        write_u16(
-            &mut writer,
-            cell.polygon.len().min(u16::MAX as usize) as u16,
-        )?;
-        write_f32(&mut writer, cell.confidence)?;
-        write_u16(&mut writer, quantize(cell.centroid.x, origin_x, chunk_size))?;
-        write_u16(&mut writer, quantize(cell.centroid.y, origin_y, chunk_size))?;
-        write_u32(&mut writer, vertex_offset)?;
-        write_u16(&mut writer, quantize(cell.bbox.min_x, origin_x, chunk_size))?;
-        write_u16(&mut writer, quantize(cell.bbox.min_y, origin_y, chunk_size))?;
-        write_u16(&mut writer, quantize(cell.bbox.max_x, origin_x, chunk_size))?;
-        write_u16(&mut writer, quantize(cell.bbox.max_y, origin_y, chunk_size))?;
+        writer.extend_from_slice(&cell.cell_id.to_le_bytes());
+        writer.extend_from_slice(&cell.class_id.to_le_bytes());
+        writer.extend_from_slice(&(cell.polygon.len().min(u16::MAX as usize) as u16).to_le_bytes());
+        writer.extend_from_slice(&cell.confidence.to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.centroid.x, origin_x, chunk_size).to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.centroid.y, origin_y, chunk_size).to_le_bytes());
+        writer.extend_from_slice(&vertex_offset.to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.bbox.min_x, origin_x, chunk_size).to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.bbox.min_y, origin_y, chunk_size).to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.bbox.max_x, origin_x, chunk_size).to_le_bytes());
+        writer.extend_from_slice(&quantize(cell.bbox.max_y, origin_y, chunk_size).to_le_bytes());
         vertex_offset = vertex_offset.saturating_add(cell.polygon.len() as u32);
     }
 
     for cell in cells {
         for point in &cell.polygon {
-            write_u16(&mut writer, quantize(point.x, origin_x, chunk_size))?;
-            write_u16(&mut writer, quantize(point.y, origin_y, chunk_size))?;
+            writer.extend_from_slice(&quantize(point.x, origin_x, chunk_size).to_le_bytes());
+            writer.extend_from_slice(&quantize(point.y, origin_y, chunk_size).to_le_bytes());
         }
     }
 
     let byte_size = writer.len() as u64;
-    Ok((
+    (
         writer,
         ChunkStats {
             polygon_vertex_count,
             byte_size,
             bbox,
         },
-    ))
+    )
 }
 
 impl InMemoryCells {
@@ -729,26 +719,6 @@ impl InMemoryCells {
 fn quantize(value: f32, origin: f32, chunk_size: u32) -> u16 {
     let normalized = ((value - origin) / chunk_size as f32).clamp(0.0, 1.0);
     (normalized * u16::MAX as f32).round() as u16
-}
-
-fn write_u16(writer: &mut dyn Write, value: u16) -> Result<()> {
-    writer.write_all(&value.to_le_bytes())?;
-    Ok(())
-}
-
-fn write_u32(writer: &mut dyn Write, value: u32) -> Result<()> {
-    writer.write_all(&value.to_le_bytes())?;
-    Ok(())
-}
-
-fn write_u64(writer: &mut dyn Write, value: u64) -> Result<()> {
-    writer.write_all(&value.to_le_bytes())?;
-    Ok(())
-}
-
-fn write_f32(writer: &mut dyn Write, value: f32) -> Result<()> {
-    writer.write_all(&value.to_le_bytes())?;
-    Ok(())
 }
 
 fn validate_load_options(options: &CellLoadOptions) -> Result<()> {
@@ -903,5 +873,53 @@ mod tests {
         ]);
         assert!((centroid.x - 1.0).abs() < 0.001);
         assert!((centroid.y - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn encode_chunk_header_layout() {
+        use super::{encode_chunk, BBox, CellRecord, ChunkKey};
+
+        let polygon = vec![
+            Point {
+                x: 4100.0,
+                y: 8200.0,
+            },
+            Point {
+                x: 4110.0,
+                y: 8200.0,
+            },
+            Point {
+                x: 4110.0,
+                y: 8210.0,
+            },
+        ];
+        let cell = CellRecord {
+            cell_id: 42,
+            class_id: 3,
+            confidence: 0.5,
+            centroid: Point {
+                x: 4105.0,
+                y: 8205.0,
+            },
+            bbox: BBox::from_points(&polygon).unwrap(),
+            polygon,
+        };
+        let (bytes, stats) = encode_chunk(ChunkKey { x: 1, y: 2 }, 4096, &[cell]);
+        let u32_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let f32_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+
+        assert_eq!(&bytes[0..4], b"FOVC");
+        assert_eq!(u32_at(4), 1); // version
+        assert_eq!((u32_at(8), u32_at(12)), (1, 2)); // chunk x, y
+        assert_eq!((f32_at(16), f32_at(20)), (4096.0, 8192.0)); // origin
+        assert_eq!((f32_at(24), f32_at(28)), (4096.0, 4096.0)); // chunk size
+        assert_eq!(u32_at(32), 1); // cell count
+        assert_eq!(u32_at(36), 3); // polygon vertex count
+        assert_eq!(u64::from_le_bytes(bytes[40..48].try_into().unwrap()), 42); // cell id
+        assert_eq!(u16::from_le_bytes([bytes[48], bytes[49]]), 3); // class id
+        assert_eq!(bytes.len(), 40 + 32 + 3 * 4);
+        assert_eq!(stats.byte_size, bytes.len() as u64);
     }
 }
