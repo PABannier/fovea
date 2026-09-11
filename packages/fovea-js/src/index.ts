@@ -804,20 +804,11 @@ export class FoveaViewer {
     const bitmap = await createImageBitmap(blob);
 
     try {
-      const rgba = decodeBitmapRgba(bitmap, request.width, request.height);
-
       if (controller.signal.aborted || version !== this.slideVersion || this.destroyed) {
         return;
       }
 
-      this.wasm.uploadTileRgba(
-        request.level,
-        request.x,
-        request.y,
-        rgba.width,
-        rgba.height,
-        rgba.data
-      );
+      this.wasm.uploadTileBitmap(request.level, request.x, request.y, bitmap);
     } finally {
       bitmap.close();
     }
@@ -949,40 +940,4 @@ function cellChunkKey(request: CellChunkRequest): string {
 
 function heatmapTileKey(request: HeatmapTileRequest): string {
   return `${request.level}/${request.x}/${request.y}`;
-}
-
-function decodeBitmapRgba(
-  bitmap: ImageBitmap,
-  expectedWidth: number,
-  expectedHeight: number
-): { data: Uint8Array; width: number; height: number } {
-  const width = bitmap.width || expectedWidth;
-  const height = bitmap.height || expectedHeight;
-  const canvas =
-    typeof OffscreenCanvas !== "undefined"
-      ? new OffscreenCanvas(width, height)
-      : document.createElement("canvas");
-
-  canvas.width = width;
-  canvas.height = height;
-
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-
-  if (!context) {
-    throw new Error("2D canvas context unavailable for tile decode");
-  }
-
-  context.clearRect(0, 0, width, height);
-  context.drawImage(bitmap, 0, 0, width, height);
-
-  const imageData = context.getImageData(0, 0, width, height);
-  return {
-    data: new Uint8Array(
-      imageData.data.buffer,
-      imageData.data.byteOffset,
-      imageData.data.byteLength
-    ),
-    width,
-    height
-  };
 }
