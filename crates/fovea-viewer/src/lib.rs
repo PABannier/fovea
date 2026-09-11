@@ -11,12 +11,9 @@ use web_sys::HtmlCanvasElement;
 use wgpu::util::DeviceExt;
 
 const WORLD_SIZE: f64 = 100_000.0;
-const TILE_CACHE_SOFT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
-const TILE_CACHE_HARD_LIMIT_BYTES: usize = 384 * 1024 * 1024;
-const OVERLAY_CACHE_SOFT_LIMIT_BYTES: usize = 128 * 1024 * 1024;
-const OVERLAY_CACHE_HARD_LIMIT_BYTES: usize = 192 * 1024 * 1024;
-const HEATMAP_CACHE_SOFT_LIMIT_BYTES: usize = 96 * 1024 * 1024;
-const HEATMAP_CACHE_HARD_LIMIT_BYTES: usize = 160 * 1024 * 1024;
+const TILE_CACHE_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+const OVERLAY_CACHE_LIMIT_BYTES: usize = 128 * 1024 * 1024;
+const HEATMAP_CACHE_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 const POLYGON_OUTLINE_MIN_ZOOM: f64 = 0.05;
 const OVERLAY_PICK_RADIUS_PX: f64 = 8.0;
 const OVERLAY_HOVER_CLASS_ID: u32 = u32::MAX;
@@ -1174,6 +1171,7 @@ struct Renderer {
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    tile_sampler: wgpu::Sampler,
     cell_style_buffer: wgpu::Buffer,
     cell_style_bind_group: wgpu::BindGroup,
     cell_style_uniform: CellStyleUniform,
@@ -1344,6 +1342,14 @@ impl Renderer {
                     },
                 ],
             });
+        let tile_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("fovea-tile-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         let cell_style_uniform = CellStyleUniform::default();
         let cell_style_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -1415,6 +1421,7 @@ impl Renderer {
             camera_buffer,
             camera_bind_group,
             texture_bind_group_layout,
+            tile_sampler,
             cell_style_buffer,
             cell_style_bind_group,
             cell_style_uniform,
@@ -1422,18 +1429,9 @@ impl Renderer {
             slide_manifest: None,
             cell_overlay_manifest: None,
             heatmap_manifest: None,
-            texture_cache: TextureCache::new(
-                TILE_CACHE_SOFT_LIMIT_BYTES,
-                TILE_CACHE_HARD_LIMIT_BYTES,
-            ),
-            heatmap_cache: TextureCache::new(
-                HEATMAP_CACHE_SOFT_LIMIT_BYTES,
-                HEATMAP_CACHE_HARD_LIMIT_BYTES,
-            ),
-            overlay_cache: OverlayCache::new(
-                OVERLAY_CACHE_SOFT_LIMIT_BYTES,
-                OVERLAY_CACHE_HARD_LIMIT_BYTES,
-            ),
+            texture_cache: TextureCache::new(TILE_CACHE_LIMIT_BYTES),
+            heatmap_cache: TextureCache::new(HEATMAP_CACHE_LIMIT_BYTES),
+            overlay_cache: OverlayCache::new(OVERLAY_CACHE_LIMIT_BYTES),
             overlay_style,
             heatmap_style,
             hovered_cell: None,
@@ -1574,6 +1572,7 @@ impl Renderer {
             &self.device,
             &self.queue,
             &self.texture_bind_group_layout,
+            &self.tile_sampler,
             id,
             width,
             height,
@@ -1718,6 +1717,7 @@ impl Renderer {
             &self.device,
             &self.queue,
             &self.texture_bind_group_layout,
+            &self.tile_sampler,
             id,
             width,
             height,
@@ -2397,18 +2397,16 @@ fn push_tile_vertices(vertices: &mut Vec<TileVertex>, rect: Rect, uv: UvRect) {
 }
 
 struct OverlayCache {
-    soft_limit_bytes: usize,
-    hard_limit_bytes: usize,
+    limit_bytes: usize,
     entries: HashMap<OverlayChunkId, OverlayEntry>,
     bytes: usize,
     cpu_bytes: usize,
 }
 
 impl OverlayCache {
-    fn new(soft_limit_bytes: usize, hard_limit_bytes: usize) -> Self {
+    fn new(limit_bytes: usize) -> Self {
         Self {
-            soft_limit_bytes,
-            hard_limit_bytes,
+            limit_bytes,
             entries: HashMap::new(),
             bytes: 0,
             cpu_bytes: 0,
@@ -2488,7 +2486,7 @@ impl OverlayCache {
     }
 
     fn evict(&mut self, visible_ids: &HashSet<OverlayChunkId>) {
-        if self.bytes <= self.hard_limit_bytes && self.bytes <= self.soft_limit_bytes {
+        if self.bytes <= self.limit_bytes {
             return;
         }
 
@@ -2500,9 +2498,8 @@ impl OverlayCache {
             .collect();
         candidates.sort_by_key(|(_, last_used_frame)| *last_used_frame);
 
-        let target = self.soft_limit_bytes.min(self.hard_limit_bytes);
         for (id, _) in candidates {
-            if self.bytes <= target {
+            if self.bytes <= self.limit_bytes {
                 break;
             }
 
@@ -2774,17 +2771,15 @@ impl<'a> ByteReader<'a> {
 }
 
 struct TextureCache {
-    soft_limit_bytes: usize,
-    hard_limit_bytes: usize,
+    limit_bytes: usize,
     entries: HashMap<TileId, TextureEntry>,
     bytes: usize,
 }
 
 impl TextureCache {
-    fn new(soft_limit_bytes: usize, hard_limit_bytes: usize) -> Self {
+    fn new(limit_bytes: usize) -> Self {
         Self {
-            soft_limit_bytes,
-            hard_limit_bytes,
+            limit_bytes,
             entries: HashMap::new(),
             bytes: 0,
         }
@@ -2819,6 +2814,7 @@ impl TextureCache {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
         id: TileId,
         width: u32,
         height: u32,
@@ -2860,14 +2856,6 @@ impl TextureCache {
             texture_size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("fovea-slide-tile-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fovea-slide-tile-bind-group"),
             layout,
@@ -2878,7 +2866,7 @@ impl TextureCache {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -2887,12 +2875,7 @@ impl TextureCache {
         self.entries.insert(
             id,
             TextureEntry {
-                texture,
-                view,
-                sampler,
                 bind_group,
-                width,
-                height,
                 bytes,
                 last_used_frame: frame_index,
             },
@@ -2906,6 +2889,7 @@ impl TextureCache {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
+        sampler: &wgpu::Sampler,
         id: TileId,
         width: u32,
         height: u32,
@@ -2947,14 +2931,6 @@ impl TextureCache {
             texture_size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("fovea-heatmap-tile-sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("fovea-heatmap-tile-bind-group"),
             layout,
@@ -2965,7 +2941,7 @@ impl TextureCache {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -2974,12 +2950,7 @@ impl TextureCache {
         self.entries.insert(
             id,
             TextureEntry {
-                texture,
-                view,
-                sampler,
                 bind_group,
-                width,
-                height,
                 bytes,
                 last_used_frame: frame_index,
             },
@@ -2993,7 +2964,7 @@ impl TextureCache {
         camera: &Camera,
         manifest: Option<&SlideManifest>,
     ) {
-        if self.bytes <= self.hard_limit_bytes && self.bytes <= self.soft_limit_bytes {
+        if self.bytes <= self.limit_bytes {
             return;
         }
 
@@ -3012,9 +2983,8 @@ impl TextureCache {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let target = self.soft_limit_bytes.min(self.hard_limit_bytes);
         for id in candidates {
-            if self.bytes <= target {
+            if self.bytes <= self.limit_bytes {
                 break;
             }
 
@@ -3049,17 +3019,7 @@ fn eviction_score(
 }
 
 struct TextureEntry {
-    #[allow(dead_code)]
-    texture: wgpu::Texture,
-    #[allow(dead_code)]
-    view: wgpu::TextureView,
-    #[allow(dead_code)]
-    sampler: wgpu::Sampler,
     bind_group: wgpu::BindGroup,
-    #[allow(dead_code)]
-    width: u32,
-    #[allow(dead_code)]
-    height: u32,
     bytes: usize,
     last_used_frame: u64,
 }
