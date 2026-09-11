@@ -2721,13 +2721,6 @@ struct DecodedOverlayChunk {
     polygon_points: Vec<[f32; 2]>,
 }
 
-#[derive(Clone, Copy)]
-struct OverlayCellHeader {
-    class_id: u32,
-    vertex_count: u16,
-    vertex_offset: u32,
-}
-
 struct CellPickRecord {
     cell_id: u64,
     class_id: u32,
@@ -2779,7 +2772,6 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
     let cell_count = reader.read_u32()? as usize;
     let polygon_vertex_count = reader.read_u32()? as usize;
     let mut points = Vec::with_capacity(cell_count);
-    let mut headers = Vec::with_capacity(cell_count);
     let mut cells = Vec::with_capacity(cell_count);
 
     for _ in 0..cell_count {
@@ -2809,11 +2801,6 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
             class_id,
             _pad: 0,
         });
-        headers.push(OverlayCellHeader {
-            class_id,
-            vertex_count,
-            vertex_offset,
-        });
         cells.push(CellPickRecord {
             cell_id,
             class_id,
@@ -2835,9 +2822,9 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
     }
 
     let mut strokes = Vec::new();
-    for header in headers {
-        let start = header.vertex_offset as usize;
-        let len = usize::from(header.vertex_count);
+    for cell in &cells {
+        let start = cell.vertex_offset as usize;
+        let len = usize::from(cell.vertex_count);
 
         if len < 2 || start + len > polygon_points.len() {
             continue;
@@ -2846,7 +2833,7 @@ fn decode_overlay_chunk(id: OverlayChunkId, bytes: &[u8]) -> Result<DecodedOverl
         for index in 0..len {
             let a = polygon_points[start + index];
             let b = polygon_points[start + ((index + 1) % len)];
-            push_stroke_segment(&mut strokes, a, b, header.class_id);
+            push_stroke_segment(&mut strokes, a, b, cell.class_id);
         }
     }
 
