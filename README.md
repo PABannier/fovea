@@ -102,7 +102,6 @@ The canvas should have stable CSS dimensions:
 ```ts
 interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
-  pointCount?: 10_000 | 100_000 | 500_000 | 1_000_000;
   slideUrl?: string;
   cellsUrl?: string;
   heatmapUrl?: string;
@@ -117,7 +116,6 @@ interface FoveaViewerOptions {
 ```
 
 - `canvas`: Required render target.
-- `pointCount`: Synthetic benchmark point count used when no slide, cells, or heatmap are loaded.
 - `slideUrl`: Direct server slide endpoint, usually `/slide`.
 - `cellsUrl`: Direct server cell endpoint, usually `/cells`.
 - `heatmapUrl`: Direct server heatmap endpoint, usually `/heatmap`.

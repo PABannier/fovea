@@ -11,7 +11,6 @@ use web_sys::HtmlCanvasElement;
 use wgpu::util::DeviceExt;
 
 const WORLD_SIZE: f64 = 100_000.0;
-const MAX_POINTS: u32 = 1_000_000;
 const TILE_CACHE_SOFT_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const TILE_CACHE_HARD_LIMIT_BYTES: usize = 384 * 1024 * 1024;
 const OVERLAY_CACHE_SOFT_LIMIT_BYTES: usize = 128 * 1024 * 1024;
@@ -48,11 +47,10 @@ impl FoveaViewer {
     pub async fn create(canvas: HtmlCanvasElement) -> Result<FoveaViewer, JsValue> {
         PANIC_HOOK.call_once(console_error_panic_hook::set_once);
 
-        let mut renderer = Renderer::new(canvas).await?;
+        let renderer = Renderer::new(canvas).await?;
         let camera =
             Camera::fit_dimensions(renderer.width, renderer.height, WORLD_SIZE, WORLD_SIZE, 1.0);
         renderer.write_camera(&camera);
-        renderer.set_point_count(100_000)?;
 
         Ok(Self {
             renderer,
@@ -127,11 +125,6 @@ impl FoveaViewer {
             center_y: self.camera.center_y,
             zoom: self.camera.zoom,
         });
-    }
-
-    #[wasm_bindgen(js_name = setPointCount)]
-    pub fn set_point_count(&mut self, count: u32) -> Result<(), JsValue> {
-        self.renderer.set_point_count(count.min(MAX_POINTS))
     }
 
     #[wasm_bindgen(js_name = visibleTileRequests)]
@@ -1228,10 +1221,8 @@ struct Renderer {
     config: wgpu::SurfaceConfiguration,
     width: u32,
     height: u32,
-    triangle_pipeline: wgpu::RenderPipeline,
     tile_pipeline: wgpu::RenderPipeline,
     heatmap_pipeline: wgpu::RenderPipeline,
-    point_pipeline: wgpu::RenderPipeline,
     overlay_point_pipeline: wgpu::RenderPipeline,
     overlay_line_pipeline: wgpu::RenderPipeline,
     camera_buffer: wgpu::Buffer,
@@ -1241,8 +1232,6 @@ struct Renderer {
     cell_style_bind_group: wgpu::BindGroup,
     cell_style_uniform: CellStyleUniform,
     cell_class_visible: [bool; CELL_STYLE_CLASS_CAP],
-    point_buffer: Option<wgpu::Buffer>,
-    point_count: u32,
     slide_manifest: Option<SlideManifest>,
     cell_overlay_manifest: Option<CellOverlayManifest>,
     heatmap_manifest: Option<HeatmapManifest>,
@@ -1439,12 +1428,6 @@ impl Renderer {
             }],
         });
 
-        let triangle_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("fovea-triangle-pipeline-layout"),
-                bind_group_layouts: &[],
-                immediate_size: 0,
-            });
         let tile_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fovea-tile-pipeline-layout"),
             bind_group_layouts: &[
@@ -1453,12 +1436,6 @@ impl Renderer {
             ],
             immediate_size: 0,
         });
-        let point_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("fovea-point-pipeline-layout"),
-                bind_group_layouts: &[Some(&camera_bind_group_layout)],
-                immediate_size: 0,
-            });
         let overlay_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("fovea-overlay-pipeline-layout"),
@@ -1470,13 +1447,9 @@ impl Renderer {
                 immediate_size: 0,
             });
 
-        let triangle_pipeline =
-            create_triangle_pipeline(&device, &triangle_pipeline_layout, &shader, format);
         let tile_pipeline = create_tile_pipeline(&device, &tile_pipeline_layout, &shader, format);
         let heatmap_pipeline =
             create_heatmap_pipeline(&device, &tile_pipeline_layout, &shader, format);
-        let point_pipeline =
-            create_point_pipeline(&device, &point_pipeline_layout, &shader, format);
         let overlay_point_pipeline =
             create_overlay_point_pipeline(&device, &overlay_pipeline_layout, &shader, format);
         let overlay_line_pipeline =
@@ -1489,10 +1462,8 @@ impl Renderer {
             config,
             width,
             height,
-            triangle_pipeline,
             tile_pipeline,
             heatmap_pipeline,
-            point_pipeline,
             overlay_point_pipeline,
             overlay_line_pipeline,
             camera_buffer,
@@ -1502,8 +1473,6 @@ impl Renderer {
             cell_style_bind_group,
             cell_style_uniform,
             cell_class_visible: [true; CELL_STYLE_CLASS_CAP],
-            point_buffer: None,
-            point_count: 0,
             slide_manifest: None,
             cell_overlay_manifest: None,
             heatmap_manifest: None,
@@ -1584,39 +1553,6 @@ impl Renderer {
                 &camera.as_uniform_with_heatmap(self.overlay_style, self.heatmap_style),
             ),
         );
-    }
-
-    fn set_point_count(&mut self, count: u32) -> Result<(), JsValue> {
-        let count = count.min(MAX_POINTS);
-        let start = Date::now();
-        let mut points = Vec::with_capacity(count as usize);
-        let mut seed = 0x1234_5678_u32;
-
-        for index in 0..count {
-            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let x = (seed as f64 / u32::MAX as f64) * WORLD_SIZE;
-            seed = seed
-                .wrapping_mul(1_664_525)
-                .wrapping_add(index ^ 1_013_904_223);
-            let y = (seed as f64 / u32::MAX as f64) * WORLD_SIZE;
-            points.push(PointVertex {
-                position: [x as f32, y as f32],
-            });
-        }
-
-        let bytes = bytemuck::cast_slice(&points);
-        self.point_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("fovea-synthetic-points"),
-                contents: bytes,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-        self.point_count = count;
-        self.last_upload_time_ms = Date::now() - start;
-        self.update_memory_stats(bytes.len());
-
-        Ok(())
     }
 
     fn visible_tile_requests(&self, camera: &Camera, max_requests: usize) -> Option<String> {
@@ -2116,19 +2052,6 @@ impl Renderer {
                         pass.draw(command.vertex_start..command.vertex_start + 6, 0..1);
                     }
                 }
-            } else if self.slide_manifest.is_none()
-                && self.cell_overlay_manifest.is_none()
-                && self.heatmap_manifest.is_none()
-            {
-                pass.set_pipeline(&self.triangle_pipeline);
-                pass.draw(0..3, 0..1);
-
-                if let Some(point_buffer) = &self.point_buffer {
-                    pass.set_pipeline(&self.point_pipeline);
-                    pass.set_bind_group(0, &self.camera_bind_group, &[]);
-                    pass.set_vertex_buffer(0, point_buffer.slice(..));
-                    pass.draw(0..self.point_count, 0..1);
-                }
             }
 
             if !heatmap_draw.commands.is_empty() && !heatmap_draw.vertices.is_empty() {
@@ -2195,14 +2118,6 @@ impl Renderer {
             .evict(&heatmap_draw.cache_visible_ids, camera, None);
         self.overlay_cache.evict(&overlay_draw.visible_ids);
         self.update_memory_stats(0);
-        let synthetic_draw_calls = if self.slide_manifest.is_none()
-            && self.cell_overlay_manifest.is_none()
-            && self.heatmap_manifest.is_none()
-        {
-            2
-        } else {
-            0
-        };
         let heatmap_draw_calls = heatmap_draw.commands.len();
         let overlay_draw_calls = overlay_draw.draw_call_count(camera.zoom)
             + usize::from(overlay_highlight_buffer.is_some());
@@ -2210,10 +2125,8 @@ impl Renderer {
         Ok(FrameStats {
             frame_time_ms: Date::now() - start,
             upload_time_ms: self.last_upload_time_ms,
-            draw_call_count: (slide_draw.commands.len()
-                + heatmap_draw_calls
-                + synthetic_draw_calls
-                + overlay_draw_calls) as u32,
+            draw_call_count: (slide_draw.commands.len() + heatmap_draw_calls + overlay_draw_calls)
+                as u32,
             visible_object_count: if overlay_draw.visible_cell_count > 0 {
                 overlay_draw.visible_cell_count
             } else if heatmap_draw.visible_tile_count > 0 {
@@ -2221,7 +2134,7 @@ impl Renderer {
             } else if self.slide_manifest.is_some() {
                 slide_draw.visible_tile_count as u32
             } else {
-                self.point_count
+                0
             },
             visible_tile_count: slide_draw.visible_tile_count as u32,
             loaded_tile_count: self.texture_cache.len() as u32,
@@ -2474,14 +2387,10 @@ impl Renderer {
     }
 
     fn update_memory_stats(&mut self, extra_cpu_bytes: usize) {
-        let point_bytes = self
-            .point_count
-            .saturating_mul(std::mem::size_of::<PointVertex>() as u32);
         let gpu_bytes = std::mem::size_of::<CameraUniform>()
             + self.texture_cache.bytes
             + self.heatmap_cache.bytes
-            + self.overlay_cache.bytes
-            + point_bytes as usize;
+            + self.overlay_cache.bytes;
 
         self.gpu_buffer_memory_bytes = gpu_bytes.min(u32::MAX as usize) as u32;
         self.cpu_memory_bytes =
@@ -3277,25 +3186,6 @@ struct TextureEntry {
     last_used_frame: u64,
 }
 
-fn create_triangle_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-triangle-pipeline",
-        layout,
-        shader,
-        "vs_triangle",
-        "fs_triangle",
-        format,
-        &[],
-        wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
 fn create_tile_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,
@@ -3331,25 +3221,6 @@ fn create_heatmap_pipeline(
         format,
         &[TileVertex::layout()],
         wgpu::PrimitiveTopology::TriangleList,
-    )
-}
-
-fn create_point_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-) -> wgpu::RenderPipeline {
-    create_pipeline(
-        device,
-        "fovea-point-pipeline",
-        layout,
-        shader,
-        "vs_point",
-        "fs_point",
-        format,
-        &[PointVertex::layout()],
-        wgpu::PrimitiveTopology::PointList,
     )
 }
 
@@ -3541,26 +3412,6 @@ impl TileVertex {
                     shader_location: 1,
                 },
             ],
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct PointVertex {
-    position: [f32; 2],
-}
-
-impl PointVertex {
-    fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<PointVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 0,
-                shader_location: 0,
-            }],
         }
     }
 }

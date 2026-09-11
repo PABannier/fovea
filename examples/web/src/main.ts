@@ -324,7 +324,7 @@ function updateLoadStatus(): void {
   } else if (heatmapLoaded) {
     loadStatusElement.textContent = "Heatmap";
   } else {
-    loadStatusElement.textContent = "Synthetic";
+    loadStatusElement.textContent = "Empty";
   }
 }
 
