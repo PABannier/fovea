@@ -2864,56 +2864,24 @@ fn push_stroke_segment(
     b: [f32; 2],
     class_id: u32,
 ) {
-    strokes.extend_from_slice(&[
-        OverlayStrokeVertex {
+    strokes.extend(
+        [
+            (0.0, -1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+            (0.0, -1.0),
+            (1.0, 1.0),
+            (0.0, 1.0),
+        ]
+        .map(|(endpoint, side)| OverlayStrokeVertex {
             segment_start: a,
             segment_end: b,
-            endpoint: 0.0,
-            side: -1.0,
+            endpoint,
+            side,
             class_id,
             _pad: 0,
-        },
-        OverlayStrokeVertex {
-            segment_start: a,
-            segment_end: b,
-            endpoint: 1.0,
-            side: -1.0,
-            class_id,
-            _pad: 0,
-        },
-        OverlayStrokeVertex {
-            segment_start: a,
-            segment_end: b,
-            endpoint: 1.0,
-            side: 1.0,
-            class_id,
-            _pad: 0,
-        },
-        OverlayStrokeVertex {
-            segment_start: a,
-            segment_end: b,
-            endpoint: 0.0,
-            side: -1.0,
-            class_id,
-            _pad: 0,
-        },
-        OverlayStrokeVertex {
-            segment_start: a,
-            segment_end: b,
-            endpoint: 1.0,
-            side: 1.0,
-            class_id,
-            _pad: 0,
-        },
-        OverlayStrokeVertex {
-            segment_start: a,
-            segment_end: b,
-            endpoint: 0.0,
-            side: 1.0,
-            class_id,
-            _pad: 0,
-        },
-    ]);
+        }),
+    );
 }
 
 fn point_in_polygon(x: f32, y: f32, polygon: &[[f32; 2]]) -> bool {
@@ -3876,6 +3844,20 @@ mod tests {
         assert_eq!(decoded.cells.len(), 1);
         assert_eq!(decoded.polygon_points.len(), 4);
         assert_eq!(decoded.strokes.len(), 24);
+        assert_eq!(
+            decoded.strokes[..6]
+                .iter()
+                .map(|vertex| (vertex.endpoint, vertex.side))
+                .collect::<Vec<_>>(),
+            [
+                (0.0, -1.0),
+                (1.0, -1.0),
+                (1.0, 1.0),
+                (0.0, -1.0),
+                (1.0, 1.0),
+                (0.0, 1.0),
+            ]
+        );
         assert_eq!(decoded.cells[0].cell_id, 42);
         assert_eq!(decoded.cells[0].class_id, 7);
         assert_close(f64::from(decoded.cells[0].centroid[0]), 600.0, 0.02);
