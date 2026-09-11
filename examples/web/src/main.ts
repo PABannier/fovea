@@ -1,69 +1,35 @@
 import { FoveaViewer } from "@fovea/viewer";
 import "./styles.css";
 
-const canvas = document.querySelector<HTMLCanvasElement>("#viewer");
-const toolbar = document.querySelector<HTMLElement>(".toolbar");
-const statsPanel = document.querySelector<HTMLElement>(".stats");
-const resetButton = document.querySelector<HTMLButtonElement>("#reset-camera");
-const slideForm = document.querySelector<HTMLFormElement>("#source-form");
-const slideInput = document.querySelector<HTMLInputElement>("#slide-url");
-const cellsForm = document.querySelector<HTMLFormElement>("#cells-form");
-const cellsInput = document.querySelector<HTMLInputElement>("#cells-url");
-const heatmapForm = document.querySelector<HTMLFormElement>("#heatmap-form");
-const heatmapInput = document.querySelector<HTMLInputElement>("#heatmap-url");
-const cellsVisible = document.querySelector<HTMLInputElement>("#cells-visible");
-const cellsOpacity = document.querySelector<HTMLInputElement>("#cells-opacity");
-const cellClasses = document.querySelector<HTMLElement>("#cell-classes");
-const heatmapVisible = document.querySelector<HTMLInputElement>("#heatmap-visible");
-const heatmapOpacity = document.querySelector<HTMLInputElement>("#heatmap-opacity");
-const heatmapMin = document.querySelector<HTMLInputElement>("#heatmap-min");
-const heatmapMax = document.querySelector<HTMLInputElement>("#heatmap-max");
-const heatmapColormap = document.querySelector<HTMLSelectElement>("#heatmap-colormap");
-const loadStatus = document.querySelector<HTMLElement>("#load-status");
+function $<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector);
 
-if (
-  !canvas ||
-  !toolbar ||
-  !statsPanel ||
-  !resetButton ||
-  !slideForm ||
-  !slideInput ||
-  !cellsForm ||
-  !cellsInput ||
-  !heatmapForm ||
-  !heatmapInput ||
-  !cellsVisible ||
-  !cellsOpacity ||
-  !cellClasses ||
-  !heatmapVisible ||
-  !heatmapOpacity ||
-  !heatmapMin ||
-  !heatmapMax ||
-  !heatmapColormap ||
-  !loadStatus
-) {
-  throw new Error("Fovea example DOM is incomplete");
+  if (!element) {
+    throw new Error(`Fovea example DOM is missing ${selector}`);
+  }
+
+  return element;
 }
 
-const viewerCanvas = canvas;
-const viewerToolbar = toolbar;
-const viewerStatsPanel = statsPanel;
-const resetCameraButton = resetButton;
-const slideUrlForm = slideForm;
-const slideUrlInput = slideInput;
-const cellsUrlForm = cellsForm;
-const cellsUrlInput = cellsInput;
-const heatmapUrlForm = heatmapForm;
-const heatmapUrlInput = heatmapInput;
-const cellsVisibleInput = cellsVisible;
-const cellsOpacityInput = cellsOpacity;
-const cellClassesPanel = cellClasses;
-const heatmapVisibleInput = heatmapVisible;
-const heatmapOpacityInput = heatmapOpacity;
-const heatmapMinInput = heatmapMin;
-const heatmapMaxInput = heatmapMax;
-const heatmapColormapSelect = heatmapColormap;
-const loadStatusElement = loadStatus;
+const viewerCanvas = $<HTMLCanvasElement>("#viewer");
+const viewerToolbar = $<HTMLElement>(".toolbar");
+const viewerStatsPanel = $<HTMLElement>(".stats");
+const resetCameraButton = $<HTMLButtonElement>("#reset-camera");
+const slideUrlForm = $<HTMLFormElement>("#source-form");
+const slideUrlInput = $<HTMLInputElement>("#slide-url");
+const cellsUrlForm = $<HTMLFormElement>("#cells-form");
+const cellsUrlInput = $<HTMLInputElement>("#cells-url");
+const heatmapUrlForm = $<HTMLFormElement>("#heatmap-form");
+const heatmapUrlInput = $<HTMLInputElement>("#heatmap-url");
+const cellsVisibleInput = $<HTMLInputElement>("#cells-visible");
+const cellsOpacityInput = $<HTMLInputElement>("#cells-opacity");
+const cellClassesPanel = $<HTMLElement>("#cell-classes");
+const heatmapVisibleInput = $<HTMLInputElement>("#heatmap-visible");
+const heatmapOpacityInput = $<HTMLInputElement>("#heatmap-opacity");
+const heatmapMinInput = $<HTMLInputElement>("#heatmap-min");
+const heatmapMaxInput = $<HTMLInputElement>("#heatmap-max");
+const heatmapColormapSelect = $<HTMLSelectElement>("#heatmap-colormap");
+const loadStatusElement = $<HTMLElement>("#load-status");
 let slideLoaded = false;
 let cellsLoaded = false;
 let heatmapLoaded = false;
