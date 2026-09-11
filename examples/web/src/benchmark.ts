@@ -137,8 +137,6 @@ function summarize(samples: PerformanceStats[]): PerformanceStats {
     loadedCellChunks: Math.max(...samples.map((sample) => sample.loadedCellChunks)),
     visibleCells: Math.max(...samples.map((sample) => sample.visibleCells)),
     visibleObjects: Math.max(...samples.map((sample) => sample.visibleObjects)),
-    gpuMemoryMb: Math.max(...samples.map((sample) => sample.gpuMemoryMb)),
-    cpuMemoryMbEstimate: Math.max(...samples.map((sample) => sample.cpuMemoryMbEstimate)),
     gpuBufferMemoryBytes: Math.max(...samples.map((sample) => sample.gpuBufferMemoryBytes)),
     cpuMemoryBytes: Math.max(...samples.map((sample) => sample.cpuMemoryBytes))
   };

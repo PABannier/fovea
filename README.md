@@ -159,8 +159,8 @@ viewer.setCellClassVisibility([1, 0, 1]); // show class 0 and 2, hide class 1
 // Optional per-class colors: 4 floats (r, g, b, a) per class, indexed by id.
 viewer.setCellClassColors([1, 0, 0, 1, /* class 1 */ 0, 1, 0, 1]);
 
-viewer.setHeatmapRange("heatmap", { min: 0.05, max: 1 });
-viewer.setHeatmapColormap("heatmap", "magma"); // "magma" | "viridis" | "gray"
+viewer.setHeatmapRange({ min: 0.05, max: 1 });
+viewer.setHeatmapColormap("magma"); // "magma" | "viridis" | "gray"
 
 const stats = viewer.getPerformanceStats();
 ```
