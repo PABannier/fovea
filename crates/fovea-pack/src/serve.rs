@@ -20,7 +20,7 @@ use crate::{
     heatmap::{build_heatmap_from_cells, HeatmapBuildOptions, InMemoryHeatmap},
     manifest::{ImageFormat, Manifest},
     packer::{build_slide_manifest, encode_slide_tile, slide_tile_request},
-    reader::{OpenSlideReader, SlideReader},
+    reader::OpenSlideReader,
 };
 
 #[derive(Clone, Debug)]
@@ -81,7 +81,7 @@ impl ServeOptions {
 /// [`route_request`].
 #[derive(Clone)]
 pub struct SlideSources {
-    reader: Arc<dyn SlideReader>,
+    reader: Arc<OpenSlideReader>,
     slide_manifest: Arc<Manifest>,
     slide_manifest_json: Arc<String>,
     tile_cache: Arc<Mutex<TileCache>>,
@@ -166,7 +166,7 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
         return Err(anyhow!("heatmap requires cells_protobuf_path"));
     }
 
-    let reader: Arc<dyn SlideReader> = Arc::new(OpenSlideReader::open(&options.wsi_path)?);
+    let reader = Arc::new(OpenSlideReader::open(&options.wsi_path)?);
     let slide_manifest = Arc::new(build_slide_manifest(
         reader.as_ref(),
         options.tile_size,

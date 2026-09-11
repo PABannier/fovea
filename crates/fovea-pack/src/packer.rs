@@ -5,7 +5,7 @@ use image::{DynamicImage, ImageEncoder, RgbaImage};
 
 use crate::{
     manifest::{ImageFormat, LevelManifest, Manifest, TileManifest},
-    reader::SlideReader,
+    reader::OpenSlideReader,
 };
 
 #[derive(Clone, Debug)]
@@ -18,7 +18,7 @@ pub struct SlideTileRequest {
 }
 
 pub fn build_slide_manifest(
-    reader: &dyn SlideReader,
+    reader: &OpenSlideReader,
     tile_size: u32,
     image_format: ImageFormat,
 ) -> Result<Manifest> {
@@ -26,7 +26,7 @@ pub fn build_slide_manifest(
         return Err(anyhow!("tile size must be greater than zero"));
     }
 
-    let dimensions = reader.dimensions()?;
+    let dimensions = reader.level_dimensions(0)?;
     let levels = collect_levels(reader, tile_size)?;
     let mut tiles = Vec::new();
     let extension = image_format.extension();
@@ -86,7 +86,7 @@ pub fn slide_tile_request(
 }
 
 pub fn encode_slide_tile(
-    reader: &dyn SlideReader,
+    reader: &OpenSlideReader,
     request: &SlideTileRequest,
     image_format: ImageFormat,
 ) -> Result<Vec<u8>> {
@@ -100,7 +100,7 @@ pub fn encode_slide_tile(
     encode_image_bytes(&image, image_format)
 }
 
-fn collect_levels(reader: &dyn SlideReader, tile_size: u32) -> Result<Vec<LevelManifest>> {
+fn collect_levels(reader: &OpenSlideReader, tile_size: u32) -> Result<Vec<LevelManifest>> {
     let level_count = reader.level_count()?;
     let mut levels = Vec::with_capacity(level_count);
 
