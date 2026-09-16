@@ -1,7 +1,8 @@
+use clap::ValueEnum;
 use image::ImageFormat as ImageCrateFormat;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImageFormat {
     Webp,

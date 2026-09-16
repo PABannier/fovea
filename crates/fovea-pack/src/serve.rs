@@ -14,6 +14,7 @@ use axum::{
     routing::get,
     Router,
 };
+use clap::Args;
 
 use crate::{
     cells::{load_cells_protobuf, CellLoadOptions, InMemoryCells},
@@ -23,55 +24,67 @@ use crate::{
     reader::OpenSlideReader,
 };
 
-#[derive(Clone, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct ServeOptions {
-    pub wsi_path: PathBuf,
-    pub cells_protobuf_path: Option<PathBuf>,
+    #[command(flatten)]
+    pub source: SourceOptions,
+
+    // display_order = 1 ties with --cells-protobuf; clap breaks ties by flag
+    // name, which keeps --host/--port listed right after it in --help.
+    /// Host interface to bind.
+    #[arg(long, default_value = "127.0.0.1", display_order = 1)]
     pub host: IpAddr,
+
+    /// HTTP port to bind.
+    #[arg(long, default_value_t = 7878, display_order = 1)]
     pub port: u16,
-    pub tile_size: u32,
-    pub image_format: ImageFormat,
-    pub chunk_size: u32,
-    pub max_vertices_per_cell: u16,
-    pub heatmap: bool,
-    pub heatmap_bin_size: u32,
-    pub heatmap_tile_size: u32,
-    pub tile_cache_mb: usize,
 }
 
 /// Per-slide source description, independent of any HTTP listener. This is the
 /// subset of [`ServeOptions`] needed to prepare one slide's renderable sources,
 /// so an embedding server (for example a multi-slide host) can reuse the
 /// preparation and routing logic without binding its own socket.
-#[derive(Clone, Debug)]
+#[derive(Args, Clone, Debug)]
 pub struct SourceOptions {
+    /// Input whole-slide image, for example .svs or .ndpi.
+    #[arg(long = "wsi", value_name = "WSI")]
     pub wsi_path: PathBuf,
-    pub cells_protobuf_path: Option<PathBuf>,
-    pub tile_size: u32,
-    pub image_format: ImageFormat,
-    pub chunk_size: u32,
-    pub max_vertices_per_cell: u16,
-    pub heatmap: bool,
-    pub heatmap_bin_size: u32,
-    pub heatmap_tile_size: u32,
-    pub tile_cache_mb: usize,
-}
 
-impl ServeOptions {
-    fn source_options(&self) -> SourceOptions {
-        SourceOptions {
-            wsi_path: self.wsi_path.clone(),
-            cells_protobuf_path: self.cells_protobuf_path.clone(),
-            tile_size: self.tile_size,
-            image_format: self.image_format,
-            chunk_size: self.chunk_size,
-            max_vertices_per_cell: self.max_vertices_per_cell,
-            heatmap: self.heatmap,
-            heatmap_bin_size: self.heatmap_bin_size,
-            heatmap_tile_size: self.heatmap_tile_size,
-            tile_cache_mb: self.tile_cache_mb,
-        }
-    }
+    /// Optional protobuf file containing histotyper.SlideSegmentationData.
+    #[arg(long = "cells-protobuf", value_name = "CELLS_PROTOBUF")]
+    pub cells_protobuf_path: Option<PathBuf>,
+
+    /// Served slide tile edge length in pixels.
+    #[arg(long, default_value_t = 512)]
+    pub tile_size: u32,
+
+    /// Encoded slide tile format.
+    #[arg(long, value_enum, default_value_t = ImageFormat::Webp)]
+    pub image_format: ImageFormat,
+
+    /// Spatial cell chunk edge length in level-0 slide pixels.
+    #[arg(long, default_value_t = 4096)]
+    pub chunk_size: u32,
+
+    /// Maximum polygon vertices retained per cell. Use 0 for no cap.
+    #[arg(long, default_value_t = 256)]
+    pub max_vertices_per_cell: u16,
+
+    /// Build and serve an in-memory density heatmap from the cells.
+    #[arg(long)]
+    pub heatmap: bool,
+
+    /// Level-0 slide pixels represented by one heatmap pixel.
+    #[arg(long, default_value_t = 128)]
+    pub heatmap_bin_size: u32,
+
+    /// Served heatmap tile edge length in heatmap pixels.
+    #[arg(long, default_value_t = 256)]
+    pub heatmap_tile_size: u32,
+
+    /// Maximum RAM used for encoded slide tile cache.
+    #[arg(long, default_value_t = 1024)]
+    pub tile_cache_mb: usize,
 }
 
 /// Prepared, in-memory renderable sources for a single slide: the slide reader,
@@ -228,13 +241,13 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
 }
 
 pub async fn serve_sources(options: ServeOptions) -> Result<()> {
-    let state = prepare_sources(options.source_options()).await?;
+    let state = prepare_sources(options.source.clone()).await?;
     let app = Router::new().fallback(get(handle_get)).with_state(state);
     let address = SocketAddr::from((options.host, options.port));
     let viewer_url = viewer_url(
         address,
-        options.cells_protobuf_path.is_some(),
-        options.heatmap,
+        options.source.cells_protobuf_path.is_some(),
+        options.source.heatmap,
     );
 
     eprintln!("fovea-pack serve: listening on http://{address}");
