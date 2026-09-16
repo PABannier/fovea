@@ -752,13 +752,6 @@ fn write_f32(writer: &mut dyn Write, value: f32) -> Result<()> {
 }
 
 fn validate_load_options(options: &CellLoadOptions) -> Result<()> {
-    if !options.proto_path.exists() {
-        return Err(anyhow!(
-            "input protobuf does not exist: {}",
-            options.proto_path.display()
-        ));
-    }
-
     if options.chunk_size == 0 {
         return Err(anyhow!("--chunk-size must be greater than zero"));
     }
@@ -891,6 +884,18 @@ mod tests {
     fn quantize_clamps_to_chunk() {
         assert_eq!(quantize(-10.0, 0.0, 4096), 0);
         assert_eq!(quantize(4096.0, 0.0, 4096), u16::MAX);
+    }
+
+    #[test]
+    fn missing_protobuf_error_names_path() {
+        let error = super::load_cells_protobuf(super::CellLoadOptions {
+            proto_path: "/nonexistent/cells.pb".into(),
+            id: "cells".to_string(),
+            chunk_size: 4096,
+            max_vertices_per_cell: 0,
+        })
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("failed to read /nonexistent/cells.pb"));
     }
 
     #[test]

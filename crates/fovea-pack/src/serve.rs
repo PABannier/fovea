@@ -164,13 +164,6 @@ impl TileCache {
 /// I/O; callers that care about latency should run it off the request path. The
 /// returned [`SlideSources`] is served by [`route_request`].
 pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
-    if !options.wsi_path.exists() {
-        return Err(anyhow!(
-            "input WSI does not exist: {}",
-            options.wsi_path.display()
-        ));
-    }
-
     if options.heatmap && options.cells_protobuf_path.is_none() {
         return Err(anyhow!("heatmap requires cells_protobuf_path"));
     }
