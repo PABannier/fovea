@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Once,
-};
+use std::collections::{HashMap, HashSet};
 
 use bytemuck::{Pod, Zeroable};
 use js_sys::Date;
@@ -21,8 +18,6 @@ const POLYGON_OUTLINE_MIN_ZOOM: f64 = 0.05;
 const OVERLAY_PICK_RADIUS_PX: f64 = 8.0;
 const OVERLAY_HOVER_CLASS_ID: u32 = u32::MAX;
 const OVERLAY_SELECTED_CLASS_ID: u32 = u32::MAX - 1;
-
-static PANIC_HOOK: Once = Once::new();
 
 #[cfg(target_arch = "wasm32")]
 fn js_error(message: impl AsRef<str>) -> JsValue {
@@ -45,7 +40,7 @@ pub struct FoveaViewer {
 impl FoveaViewer {
     #[wasm_bindgen(js_name = create)]
     pub async fn create(canvas: HtmlCanvasElement) -> Result<FoveaViewer, JsValue> {
-        PANIC_HOOK.call_once(console_error_panic_hook::set_once);
+        console_error_panic_hook::set_once();
 
         let renderer = Renderer::new(canvas).await?;
         let camera =
@@ -108,7 +103,7 @@ impl FoveaViewer {
         self.camera.pan_by_screen_delta(delta_x, delta_y);
         self.camera.clamp_to_world();
         self.renderer.write_camera(&self.camera);
-        self.events.push(ViewerEvent::ViewportChanged {
+        self.events.push(ViewerEvent::ViewportChange {
             center_x: self.camera.center_x,
             center_y: self.camera.center_y,
             zoom: self.camera.zoom,
@@ -120,7 +115,7 @@ impl FoveaViewer {
         self.camera.zoom_at(screen_x, screen_y, wheel_delta_y);
         self.camera.clamp_to_world();
         self.renderer.write_camera(&self.camera);
-        self.events.push(ViewerEvent::ViewportChanged {
+        self.events.push(ViewerEvent::ViewportChange {
             center_x: self.camera.center_x,
             center_y: self.camera.center_y,
             zoom: self.camera.zoom,
@@ -305,7 +300,7 @@ impl FoveaViewer {
 
     /// Set the camera directly (slide-pixel center + CSS-px-per-slide-px zoom),
     /// clamped to the world. Used to apply a remote/programmatic viewport;
-    /// deliberately does NOT emit a `viewport-changed` event (otherwise a
+    /// deliberately does NOT emit a `viewport-change` event (otherwise a
     /// follower applying a presenter viewport would rebroadcast and oscillate).
     #[wasm_bindgen(js_name = setCamera)]
     pub fn set_camera(&mut self, center_x: f64, center_y: f64, zoom: f64) {
@@ -408,7 +403,7 @@ impl FoveaViewer {
     rename_all_fields = "camelCase"
 )]
 enum ViewerEvent {
-    ViewportChanged {
+    ViewportChange {
         center_x: f64,
         center_y: f64,
         zoom: f64,

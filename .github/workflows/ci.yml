@@ -86,4 +86,7 @@ jobs:
         run: npm run format:check
 
       - name: Build
-        run: npm run build
+        # `npm run check` already built the wasm and @fovea/viewer; bundle the examples.
+        run: |
+          npm -w fovea-web-example run build
+          npm -w fovea-react-example run build

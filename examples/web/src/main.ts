@@ -119,10 +119,7 @@ async function main(): Promise<void> {
   heatmapMinInput.addEventListener("input", () => updateHeatmapRange(viewer));
   heatmapMaxInput.addEventListener("input", () => updateHeatmapRange(viewer));
   heatmapColormapSelect.addEventListener("change", () => {
-    viewer.setHeatmapColormap(
-      "heatmap",
-      heatmapColormapSelect.value as "magma" | "viridis" | "gray"
-    );
+    viewer.setHeatmapColormap(heatmapColormapSelect.value as "magma" | "viridis" | "gray");
   });
   viewer.on("cell-hover", (event) => {
     if (event.cellId == null) {
@@ -270,7 +267,7 @@ async function loadHeatmapFromInput(viewer: FoveaViewer): Promise<void> {
 function updateHeatmapRange(viewer: FoveaViewer): void {
   const min = Number(heatmapMinInput.value);
   const max = Number(heatmapMaxInput.value);
-  viewer.setHeatmapRange("heatmap", {
+  viewer.setHeatmapRange({
     min: Math.min(min, max - 0.01),
     max: Math.max(max, min + 0.01)
   });

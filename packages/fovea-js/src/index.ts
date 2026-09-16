@@ -37,8 +37,6 @@ export interface PerformanceStats {
   loadedCellChunks: number;
   visibleCells: number;
   visibleObjects: number;
-  gpuMemoryMb: number;
-  cpuMemoryMbEstimate: number;
   gpuBufferMemoryBytes: number;
   cpuMemoryBytes: number;
   inflightTileRequests: number;
@@ -81,7 +79,7 @@ type RawViewerEvent =
   | ({ type: "cell-hover" } & CellEvent)
   | ({ type: "cell-click" } & CellEvent)
   | ({ type: "selection-change" } & SelectionChangeEvent)
-  | ({ type: "viewport-changed" } & ViewportChangeEvent);
+  | ({ type: "viewport-change" } & ViewportChangeEvent);
 
 interface TileRequest {
   level: number;
@@ -301,11 +299,11 @@ export class FoveaViewer {
     }
   }
 
-  setHeatmapRange(_layerId: "heatmap" | string, range: { min: number; max: number }): void {
+  setHeatmapRange(range: { min: number; max: number }): void {
     this.wasm.setHeatmapRange(range.min, range.max);
   }
 
-  setHeatmapColormap(_layerId: "heatmap" | string, colormap: "magma" | "viridis" | "gray"): void {
+  setHeatmapColormap(colormap: "magma" | "viridis" | "gray"): void {
     this.wasm.setHeatmapColormap(colormap);
   }
 
@@ -430,8 +428,6 @@ export class FoveaViewer {
       loadedCellChunks: stats?.loadedCellChunkCount ?? 0,
       visibleCells: stats?.visibleCellCount ?? 0,
       visibleObjects: stats?.visibleObjectCount ?? 0,
-      gpuMemoryMb: bytesToMiB(gpuBytes),
-      cpuMemoryMbEstimate: bytesToMiB(cpuBytes),
       gpuBufferMemoryBytes: gpuBytes,
       cpuMemoryBytes: cpuBytes,
       inflightTileRequests: this.inflightTiles.size,
@@ -848,15 +844,6 @@ export class FoveaViewer {
     }
 
     for (const event of events) {
-      if (event.type === "viewport-changed") {
-        this.dispatchEvent("viewport-change", {
-          centerX: event.centerX,
-          centerY: event.centerY,
-          zoom: event.zoom
-        });
-        continue;
-      }
-
       this.dispatchEvent(event.type, event as FoveaViewerEvents[typeof event.type]);
     }
   }
@@ -910,10 +897,6 @@ function emptyRollingStats(): RollingFrameStats {
     frameTimeP99: 0,
     fps: 0
   };
-}
-
-function bytesToMiB(bytes: number): number {
-  return bytes / (1024 * 1024);
 }
 
 function manifestUrlForSource(slideUrl: string): URL {

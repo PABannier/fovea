@@ -84,7 +84,6 @@ pub struct SlideSources {
     reader: Arc<dyn SlideReader>,
     slide_manifest: Arc<Manifest>,
     slide_manifest_json: Arc<String>,
-    image_format: ImageFormat,
     tile_cache: Arc<Mutex<TileCache>>,
     cells: Option<Arc<InMemoryCells>>,
     heatmap: Option<Arc<InMemoryHeatmap>>,
@@ -220,7 +219,6 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
         reader,
         slide_manifest,
         slide_manifest_json,
-        image_format: options.image_format,
         tile_cache: Arc::new(Mutex::new(TileCache::new(
             options.tile_cache_mb.saturating_mul(1024 * 1024),
         ))),
@@ -290,7 +288,7 @@ pub async fn route_request(state: &SlideSources, path: &str) -> Result<Response>
 }
 
 async fn serve_slide_tile(state: &SlideSources, path: &str) -> Result<Response> {
-    let Some((level, x, y)) = parse_slide_tile_path(path, state.image_format) else {
+    let Some((level, x, y)) = parse_slide_tile_path(path, state.slide_manifest.image_format) else {
         return Ok(text_response(StatusCode::NOT_FOUND, "tile not found"));
     };
     let key = TileKey { level, x, y };
@@ -300,7 +298,7 @@ async fn serve_slide_tile(state: &SlideSources, path: &str) -> Result<Response> 
         log_request("slide tile hit", path, bytes.len(), start);
         return Ok(bytes_response(
             StatusCode::OK,
-            state.image_format.content_type(),
+            state.slide_manifest.image_format.content_type(),
             bytes,
         ));
     }
@@ -309,7 +307,7 @@ async fn serve_slide_tile(state: &SlideSources, path: &str) -> Result<Response> 
         return Ok(text_response(StatusCode::NOT_FOUND, "tile not found"));
     };
     let reader = Arc::clone(&state.reader);
-    let image_format = state.image_format;
+    let image_format = state.slide_manifest.image_format;
     let bytes = tokio::task::spawn_blocking(move || {
         encode_slide_tile(reader.as_ref(), &request, image_format)
     })
@@ -324,7 +322,7 @@ async fn serve_slide_tile(state: &SlideSources, path: &str) -> Result<Response> 
     log_request("slide tile miss", path, bytes.len(), start);
     Ok(bytes_response(
         StatusCode::OK,
-        state.image_format.content_type(),
+        state.slide_manifest.image_format.content_type(),
         bytes,
     ))
 }
