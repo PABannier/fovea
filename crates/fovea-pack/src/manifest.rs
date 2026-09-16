@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use image::ImageFormat as ImageCrateFormat;
 use serde::{Deserialize, Serialize};
 
@@ -52,26 +50,7 @@ impl Size {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct Bounds {
-    pub x: Option<i64>,
-    pub y: Option<i64>,
-    pub width: Option<u32>,
-    pub height: Option<u32>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Metadata {
-    pub vendor: Option<String>,
-    pub mpp_x: Option<f64>,
-    pub mpp_y: Option<f64>,
-    pub objective_power: Option<f64>,
-    pub background_color: Option<String>,
-    pub bounds: Bounds,
-    pub raw_properties: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct LevelManifest {
     pub index: u32,
     pub width: u32,
@@ -79,7 +58,6 @@ pub struct LevelManifest {
     pub downsample: f64,
     pub tile_cols: u32,
     pub tile_rows: u32,
-    pub tile_count: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -94,15 +72,7 @@ pub struct TileManifest {
     pub skipped: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AssociatedImageManifest {
-    pub name: String,
-    pub width: u32,
-    pub height: u32,
-    pub path: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Manifest {
     pub schema: String,
     pub version: String,
@@ -112,9 +82,6 @@ pub struct Manifest {
     pub height: u32,
     pub levels: Vec<LevelManifest>,
     pub tiles: Vec<TileManifest>,
-    pub associated_images: Vec<AssociatedImageManifest>,
-    pub metadata: Metadata,
-    pub coordinate_consistency_max_error_px: f64,
 }
 
 #[cfg(test)]
