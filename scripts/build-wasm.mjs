@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
 const root = resolve(dirname(new URL(import.meta.url).pathname), "..");
@@ -19,16 +18,6 @@ function run(command, args, options = {}) {
   }
 }
 
-function commandExists(command) {
-  const result = spawnSync(command, ["--version"], {
-    cwd: root,
-    stdio: "ignore",
-    shell: process.platform === "win32"
-  });
-
-  return result.status === 0;
-}
-
 function commandVersion(command) {
   const result = spawnSync(command, ["--version"], {
     cwd: root,
@@ -43,20 +32,10 @@ function commandVersion(command) {
   return result.stdout.trim();
 }
 
-const installedTargets = spawnSync("rustup", ["target", "list", "--installed"], {
-  cwd: root,
-  encoding: "utf8",
-  shell: process.platform === "win32"
-});
+// No-op when the target is already installed.
+run("rustup", ["target", "add", wasmTarget]);
 
-if (!installedTargets.stdout?.includes(wasmTarget)) {
-  run("rustup", ["target", "add", wasmTarget]);
-}
-
-if (
-  !commandExists("wasm-bindgen") ||
-  !commandVersion("wasm-bindgen").includes(wasmBindgenVersion)
-) {
+if (!commandVersion("wasm-bindgen").includes(wasmBindgenVersion)) {
   run("cargo", [
     "install",
     "wasm-bindgen-cli",
@@ -68,17 +47,12 @@ if (
 }
 
 const outDir = resolve(root, "packages/fovea-js/pkg");
-mkdirSync(outDir, { recursive: true });
 
 run("cargo", ["build", "--release", "--target", wasmTarget, "-p", "fovea-viewer"]);
 
 const wasmPath = resolve(root, "target/wasm32-unknown-unknown/release/fovea_viewer.wasm");
 
-if (!existsSync(wasmPath)) {
-  console.error(`Missing WASM artifact: ${wasmPath}`);
-  process.exit(1);
-}
-
+// wasm-bindgen creates outDir and reports a missing input file itself.
 run("wasm-bindgen", [
   "--target",
   "web",
