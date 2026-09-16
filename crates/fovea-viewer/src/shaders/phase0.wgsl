@@ -37,32 +37,6 @@ struct VertexOut {
 };
 
 @vertex
-fn vs_triangle(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
-  var positions = array<vec2<f32>, 3>(
-    vec2<f32>(-0.92, -0.78),
-    vec2<f32>(-0.64, -0.78),
-    vec2<f32>(-0.78, -0.42)
-  );
-
-  var colors = array<vec4<f32>, 3>(
-    vec4<f32>(0.94, 0.33, 0.36, 1.0),
-    vec4<f32>(0.21, 0.65, 0.54, 1.0),
-    vec4<f32>(0.23, 0.55, 0.87, 1.0)
-  );
-
-  var out: VertexOut;
-  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
-  out.color = colors[vertex_index];
-  out.uv = vec2<f32>(0.0, 0.0);
-  return out;
-}
-
-@fragment
-fn fs_triangle(input: VertexOut) -> @location(0) vec4<f32> {
-  return input.color;
-}
-
-@vertex
 fn vs_tile(@location(0) world_position: vec2<f32>, @location(1) uv: vec2<f32>) -> VertexOut {
   let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
   let ndc = vec2<f32>(
@@ -138,21 +112,6 @@ fn fs_heatmap(input: VertexOut) -> @location(0) vec4<f32> {
   let value = clamp((raw - camera.heatmap.y) / range, 0.0, 1.0);
   let alpha = clamp(camera.heatmap.x, 0.0, 1.0) * smoothstep(0.001, 0.08, value);
   return vec4<f32>(heatmap_color(value, camera.heatmap.w), alpha);
-}
-
-@vertex
-fn vs_point(@location(0) world_position: vec2<f32>) -> VertexOut {
-  let screen = (world_position - camera.center) * camera.zoom + camera.viewport * 0.5;
-  let ndc = vec2<f32>(
-    (screen.x / camera.viewport.x) * 2.0 - 1.0,
-    1.0 - (screen.y / camera.viewport.y) * 2.0
-  );
-
-  var out: VertexOut;
-  out.position = vec4<f32>(ndc, 0.0, 1.0);
-  out.color = vec4<f32>(0.93, 0.86, 0.42, 0.72);
-  out.uv = vec2<f32>(0.0, 0.0);
-  return out;
 }
 
 @fragment

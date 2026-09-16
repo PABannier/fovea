@@ -1,10 +1,7 @@
 import initWasm, { FoveaViewer as WasmFoveaViewer, type FrameStats } from "../pkg/fovea_viewer.js";
 
-export type BenchmarkPointCount = 10_000 | 100_000 | 500_000 | 1_000_000;
-
 export interface FoveaViewerOptions {
   canvas: HTMLCanvasElement;
-  pointCount?: BenchmarkPointCount;
   slideUrl?: string;
   cellsUrl?: string;
   heatmapUrl?: string;
@@ -168,10 +165,6 @@ export class FoveaViewer {
     const wasm = await WasmFoveaViewer.create(options.canvas);
     const viewer = new FoveaViewer(wasm, options.canvas, options);
 
-    if (options.pointCount) {
-      viewer.setPointCount(options.pointCount);
-    }
-
     if (options.slideUrl) {
       await viewer.loadSlide(options.slideUrl);
     }
@@ -291,10 +284,6 @@ export class FoveaViewer {
     this.heatmapBaseUrl = new URL(".", manifestUrl).toString();
     this.wasm.loadHeatmapManifest(manifestJson);
     this.frameTimes.length = 0;
-  }
-
-  setPointCount(count: BenchmarkPointCount): void {
-    this.wasm.setPointCount(count);
   }
 
   setLayerVisibility(layerId: "cells" | "heatmap" | string, visible: boolean): void {

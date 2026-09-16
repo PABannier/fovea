@@ -7,7 +7,7 @@ function App(): React.ReactElement {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewerRef = useRef<FoveaViewer | null>(null);
   const [stats, setStats] = useState<PerformanceStats | null>(null);
-  const [status, setStatus] = useState("Synthetic");
+  const [status, setStatus] = useState("Empty");
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +44,7 @@ function App(): React.ReactElement {
           params.get("heatmap") && "Heatmap"
         ]
           .filter(Boolean)
-          .join(" + ") || "Synthetic"
+          .join(" + ") || "Empty"
       );
     }
 
