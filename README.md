@@ -263,6 +263,10 @@ npm test        # cargo test for fovea-pack and fovea-viewer
 npm run check   # type-check the JS package and examples
 ```
 
+Keep the render loop cheap: it never opens WSI files, parses protobufs, scans all cells, or waits for a request.
+
+Non-goals: browser-native SVS decoding, persistent generated tile stores, polygon editing, multi-user annotation workflows, and a mobile-first touch UI.
+
 ## License
 
 Licensed under the [MIT License](LICENSE).
