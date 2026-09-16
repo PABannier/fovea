@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use js_sys::Date;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
-use web_sys::HtmlCanvasElement;
+use web_sys::{HtmlCanvasElement, ImageBitmap};
 use wgpu::util::DeviceExt;
 
 const WORLD_SIZE: f64 = 100_000.0;
@@ -134,18 +134,10 @@ impl FoveaViewer {
             .unwrap_or_else(|| "[]".to_string())
     }
 
-    #[wasm_bindgen(js_name = uploadTileRgba)]
-    pub fn upload_tile_rgba(
-        &mut self,
-        level: u32,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-    ) -> Result<(), JsValue> {
+    #[wasm_bindgen(js_name = uploadTileBitmap)]
+    pub fn upload_tile_bitmap(&mut self, level: u32, x: u32, y: u32, bitmap: ImageBitmap) {
         self.renderer
-            .upload_tile_rgba(TileId { level, x, y }, width, height, rgba)
+            .upload_tile_bitmap(TileId { level, x, y }, bitmap)
     }
 
     #[wasm_bindgen(js_name = loadCellManifest)]
@@ -1546,43 +1538,26 @@ impl Renderer {
         serde_json::to_string(&requests).ok()
     }
 
-    fn upload_tile_rgba(
-        &mut self,
-        id: TileId,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
-    ) -> Result<(), JsValue> {
+    fn upload_tile_bitmap(&mut self, id: TileId, bitmap: ImageBitmap) {
         let Some(manifest) = &self.slide_manifest else {
-            return Ok(());
+            return;
         };
 
         if !manifest.tiles.contains_key(&id) {
-            return Ok(());
-        }
-
-        let expected_len = width as usize * height as usize * 4;
-        if rgba.len() != expected_len {
-            return Err(js_error(format!(
-                "tile RGBA byte length mismatch: got {}, expected {expected_len}",
-                rgba.len()
-            )));
+            return;
         }
 
         let start = Date::now();
-        self.texture_cache.insert_rgba(
+        self.texture_cache.insert_bitmap(
             &self.device,
             &self.queue,
             &self.texture_bind_group_layout,
             id,
-            width,
-            height,
-            rgba,
+            bitmap,
             self.frame_index,
         );
         self.last_upload_time_ms = Date::now() - start;
         self.update_memory_stats(0);
-        Ok(())
     }
 
     fn visible_overlay_chunk_requests(
@@ -2813,22 +2788,20 @@ impl TextureCache {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_rgba(
+    fn insert_bitmap(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
         id: TileId,
-        width: u32,
-        height: u32,
-        rgba: &[u8],
+        bitmap: ImageBitmap,
         frame_index: u64,
     ) {
         if let Some(old) = self.entries.remove(&id) {
             self.bytes = self.bytes.saturating_sub(old.bytes);
         }
 
+        let (width, height) = (bitmap.width(), bitmap.height());
         let texture_size = wgpu::Extent3d {
             width,
             height,
@@ -2841,24 +2814,13 @@ impl TextureCache {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            // copyExternalImageToTexture requires RENDER_ATTACHMENT on the destination.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            texture_size,
-        );
+        copy_bitmap_to_texture(queue, &texture, bitmap, texture_size);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("fovea-slide-tile-sampler"),
@@ -3209,6 +3171,43 @@ fn create_canvas_surface(
     Err(js_error(
         "FoveaViewer WebGPU canvas surfaces are only available on wasm32",
     ))
+}
+
+// The sRGB destination color space plus the Rgba8UnormSrgb format stores the same
+// sRGB-encoded bytes the old 2D-canvas getImageData path produced.
+#[cfg(target_arch = "wasm32")]
+fn copy_bitmap_to_texture(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    bitmap: ImageBitmap,
+    size: wgpu::Extent3d,
+) {
+    queue.copy_external_image_to_texture(
+        &wgpu::CopyExternalImageSourceInfo {
+            source: wgpu::ExternalImageSource::ImageBitmap(bitmap),
+            origin: wgpu::Origin2d::ZERO,
+            flip_y: false,
+        },
+        wgpu::CopyExternalImageDestInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+            color_space: wgpu::PredefinedColorSpace::Srgb,
+            premultiplied_alpha: false,
+        },
+        size,
+    );
+}
+
+// Unreachable on the host: a Renderer needs a wasm32 canvas surface.
+#[cfg(not(target_arch = "wasm32"))]
+fn copy_bitmap_to_texture(
+    _queue: &wgpu::Queue,
+    _texture: &wgpu::Texture,
+    _bitmap: ImageBitmap,
+    _size: wgpu::Extent3d,
+) {
 }
 
 #[repr(C)]
