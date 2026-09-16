@@ -3503,6 +3503,9 @@ struct TileVertex {
 }
 
 impl TileVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+
     fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
         Self {
             position: [x, y],
@@ -3514,18 +3517,7 @@ impl TileVertex {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<TileVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                },
-            ],
+            attributes: &Self::ATTRIBUTES,
         }
     }
 }
@@ -3559,8 +3551,15 @@ struct OverlayPointVertex {
 }
 
 impl OverlayPointVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] =
+        wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32];
+
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        overlay_vertex_layout::<OverlayPointVertex>(wgpu::VertexStepMode::Instance)
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<OverlayPointVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBUTES,
+        }
     }
 }
 
@@ -3576,59 +3575,20 @@ struct OverlayStrokeVertex {
 }
 
 impl OverlayStrokeVertex {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+        0 => Float32x2,
+        1 => Float32x2,
+        2 => Float32,
+        3 => Float32,
+        4 => Uint32,
+    ];
+
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<OverlayStrokeVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: (std::mem::size_of::<[f32; 2]>() * 2) as wgpu::BufferAddress,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: (std::mem::size_of::<[f32; 2]>() * 2 + std::mem::size_of::<f32>())
-                        as wgpu::BufferAddress,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Uint32,
-                    offset: (std::mem::size_of::<[f32; 2]>() * 2 + std::mem::size_of::<f32>() * 2)
-                        as wgpu::BufferAddress,
-                    shader_location: 4,
-                },
-            ],
+            attributes: &Self::ATTRIBUTES,
         }
-    }
-}
-
-fn overlay_vertex_layout<'a, T>(step_mode: wgpu::VertexStepMode) -> wgpu::VertexBufferLayout<'a> {
-    wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<T>() as wgpu::BufferAddress,
-        step_mode,
-        attributes: &[
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x2,
-                offset: 0,
-                shader_location: 0,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Uint32,
-                offset: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                shader_location: 1,
-            },
-        ],
     }
 }
 
@@ -3637,6 +3597,43 @@ mod tests {
     use super::*;
 
     const EPSILON: f64 = 0.25;
+
+    #[test]
+    fn vertex_layouts_match_repr_c_structs() {
+        use std::mem::{offset_of, size_of};
+
+        fn assert_layout<T>(layout: wgpu::VertexBufferLayout, offsets: &[usize]) {
+            assert_eq!(layout.array_stride, size_of::<T>() as wgpu::BufferAddress);
+            let actual: Vec<usize> = layout
+                .attributes
+                .iter()
+                .map(|attribute| attribute.offset as usize)
+                .collect();
+            assert_eq!(actual, offsets);
+        }
+
+        assert_layout::<TileVertex>(
+            TileVertex::layout(),
+            &[offset_of!(TileVertex, position), offset_of!(TileVertex, uv)],
+        );
+        assert_layout::<OverlayPointVertex>(
+            OverlayPointVertex::layout(),
+            &[
+                offset_of!(OverlayPointVertex, position),
+                offset_of!(OverlayPointVertex, class_id),
+            ],
+        );
+        assert_layout::<OverlayStrokeVertex>(
+            OverlayStrokeVertex::layout(),
+            &[
+                offset_of!(OverlayStrokeVertex, segment_start),
+                offset_of!(OverlayStrokeVertex, segment_end),
+                offset_of!(OverlayStrokeVertex, endpoint),
+                offset_of!(OverlayStrokeVertex, side),
+                offset_of!(OverlayStrokeVertex, class_id),
+            ],
+        );
+    }
 
     #[test]
     fn camera_round_trip_preserves_slide_coordinates() {
