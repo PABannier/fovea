@@ -20,6 +20,14 @@ impl ImageFormat {
         }
     }
 
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Webp => "image/webp",
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+        }
+    }
+
     pub fn image_crate_format(self) -> ImageCrateFormat {
         match self {
             Self::Webp => ImageCrateFormat::WebP,

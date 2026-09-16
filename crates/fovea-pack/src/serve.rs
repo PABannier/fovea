@@ -8,9 +8,8 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    body::Body,
     extract::State,
-    http::{header, Method, Request, StatusCode, Uri},
+    http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -232,9 +231,7 @@ pub async fn prepare_sources(options: SourceOptions) -> Result<SlideSources> {
 
 pub async fn serve_sources(options: ServeOptions) -> Result<()> {
     let state = prepare_sources(options.source_options()).await?;
-    let app = Router::new()
-        .fallback(get(handle_get).options(handle_options))
-        .with_state(state);
+    let app = Router::new().fallback(get(handle_get)).with_state(state);
     let address = SocketAddr::from((options.host, options.port));
     let viewer_url = viewer_url(
         address,
@@ -250,10 +247,6 @@ pub async fn serve_sources(options: ServeOptions) -> Result<()> {
         .with_context(|| format!("failed to bind {address}"))?;
     axum::serve(listener, app).await?;
     Ok(())
-}
-
-async fn handle_options() -> Response {
-    empty_response(StatusCode::NO_CONTENT)
 }
 
 async fn handle_get(State(state): State<SlideSources>, uri: Uri) -> Response {
@@ -454,42 +447,8 @@ fn text_response(status: StatusCode, text: &str) -> Response {
     response
 }
 
-fn empty_response(status: StatusCode) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = status;
-    add_common_headers(response.headers_mut(), "text/plain; charset=utf-8");
-    response
-}
-
 fn add_common_headers(headers: &mut header::HeaderMap, content_type: &'static str) {
     headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*".parse().unwrap());
-    headers.insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        "GET, OPTIONS".parse().unwrap(),
-    );
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap());
     headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
-}
-
-trait ImageFormatContentType {
-    fn content_type(self) -> &'static str;
-}
-
-impl ImageFormatContentType for ImageFormat {
-    fn content_type(self) -> &'static str {
-        match self {
-            ImageFormat::Webp => "image/webp",
-            ImageFormat::Jpeg => "image/jpeg",
-            ImageFormat::Png => "image/png",
-        }
-    }
-}
-
-#[allow(dead_code)]
-async fn _method_guard(request: Request<Body>) -> Response {
-    if request.method() == Method::OPTIONS {
-        empty_response(StatusCode::NO_CONTENT)
-    } else {
-        text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
-    }
 }
