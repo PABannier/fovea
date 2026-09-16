@@ -64,7 +64,7 @@ impl FoveaViewer {
 
     #[wasm_bindgen(js_name = loadManifest)]
     pub fn load_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
-        let manifest = SlideManifest::from_json(manifest_json)?;
+        let manifest = TilePyramid::from_slide_json(manifest_json)?;
         let device_pixel_ratio = self.camera.device_pixel_ratio;
         self.camera = Camera::fit_dimensions(
             self.renderer.width,
@@ -162,9 +162,9 @@ impl FoveaViewer {
 
     #[wasm_bindgen(js_name = loadHeatmapManifest)]
     pub fn load_heatmap_manifest(&mut self, manifest_json: &str) -> Result<(), JsValue> {
-        let manifest = HeatmapManifest::from_json(manifest_json)?;
+        let manifest = TilePyramid::from_heatmap_json(manifest_json)?;
         let should_fit_heatmap = self.renderer.slide_dimensions().is_none();
-        let dimensions = manifest.dimensions();
+        let dimensions = (manifest.width, manifest.height);
         self.renderer.set_heatmap_manifest(manifest);
         if should_fit_heatmap {
             let device_pixel_ratio = self.camera.device_pixel_ratio;
@@ -621,13 +621,42 @@ struct TileId {
     y: u32,
 }
 
+/// Slide manifest (snake_case keys).
 #[derive(Clone, Debug, Deserialize)]
 struct RawManifest {
     tile_size: u32,
     width: u32,
     height: u32,
     levels: Vec<LevelManifest>,
-    tiles: Vec<TileManifest>,
+    tiles: Vec<RawSlideTile>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct RawSlideTile {
+    #[serde(flatten)]
+    tile: TileManifest,
+    skipped: bool,
+}
+
+/// Heatmap manifest (camelCase keys).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHeatmapManifest {
+    #[allow(dead_code)]
+    id: String,
+    width: u32,
+    height: u32,
+    tile_size: u32,
+    levels: Vec<LevelManifest>,
+    tiles: Vec<RawHeatmapTile>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawHeatmapTile {
+    #[serde(flatten)]
+    tile: TileManifest,
+    byte_size: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -636,7 +665,9 @@ struct LevelManifest {
     width: u32,
     height: u32,
     downsample: f64,
+    #[serde(alias = "tileCols")]
     tile_cols: u32,
+    #[serde(alias = "tileRows")]
     tile_rows: u32,
 }
 
@@ -648,41 +679,9 @@ struct TileManifest {
     width: u32,
     height: u32,
     path: String,
-    skipped: bool,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RawHeatmapManifest {
-    id: String,
-    width: u32,
-    height: u32,
-    tile_size: u32,
-    levels: Vec<HeatmapLevelManifest>,
-    tiles: Vec<HeatmapTileManifest>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HeatmapLevelManifest {
-    index: u32,
-    width: u32,
-    height: u32,
-    downsample: f64,
-    tile_cols: u32,
-    tile_rows: u32,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HeatmapTileManifest {
-    level: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    path: String,
-    byte_size: u64,
+    /// Only heatmap tiles carry a byte size; slide requests omit it.
+    #[serde(skip)]
+    byte_size: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -694,6 +693,8 @@ struct TileRequest {
     width: u32,
     height: u32,
     path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    byte_size: Option<u64>,
     priority: f64,
 }
 
@@ -742,19 +743,6 @@ struct OverlayChunkRequest {
     priority: f64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HeatmapTileRequest {
-    level: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    path: String,
-    byte_size: u64,
-    priority: f64,
-}
-
 #[derive(Clone)]
 struct CellOverlayManifest {
     #[allow(dead_code)]
@@ -765,149 +753,6 @@ struct CellOverlayManifest {
     chunk_height: u32,
     classes: Vec<CellClassManifest>,
     chunks: HashMap<OverlayChunkId, CellChunkManifest>,
-}
-
-#[derive(Clone)]
-struct HeatmapManifest {
-    #[allow(dead_code)]
-    id: String,
-    width: f64,
-    height: f64,
-    tile_size: u32,
-    levels: Vec<LevelManifest>,
-    tiles: HashMap<TileId, HeatmapTileManifest>,
-}
-
-impl HeatmapManifest {
-    fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
-        let raw: RawHeatmapManifest = serde_json::from_str(manifest_json)
-            .map_err(|err| js_error(format!("failed to parse heatmap manifest: {err}")))?;
-        let mut tiles = HashMap::new();
-
-        for tile in raw.tiles {
-            tiles.insert(
-                TileId {
-                    level: tile.level,
-                    x: tile.x,
-                    y: tile.y,
-                },
-                tile,
-            );
-        }
-
-        if raw.levels.is_empty() {
-            return Err(js_error("heatmap manifest has no pyramid levels"));
-        }
-
-        let levels = raw
-            .levels
-            .into_iter()
-            .map(|level| LevelManifest {
-                index: level.index,
-                width: level.width,
-                height: level.height,
-                downsample: level.downsample,
-                tile_cols: level.tile_cols,
-                tile_rows: level.tile_rows,
-            })
-            .collect();
-
-        Ok(Self {
-            id: raw.id,
-            width: raw.width as f64,
-            height: raw.height as f64,
-            tile_size: raw.tile_size,
-            levels,
-            tiles,
-        })
-    }
-
-    fn dimensions(&self) -> (f64, f64) {
-        (self.width, self.height)
-    }
-
-    fn best_level(&self, camera: &Camera) -> &LevelManifest {
-        self.levels
-            .iter()
-            .min_by(|left, right| {
-                let left_error = (camera.zoom * left.downsample).log2().abs();
-                let right_error = (camera.zoom * right.downsample).log2().abs();
-                left_error
-                    .partial_cmp(&right_error)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .unwrap_or(&self.levels[0])
-    }
-
-    fn visible_tiles(&self, camera: &Camera, level: &LevelManifest) -> Vec<VisibleTile> {
-        let visible = camera.visible_rect();
-
-        if visible.width <= 0.0 || visible.height <= 0.0 {
-            return Vec::new();
-        }
-
-        let tile_size = f64::from(self.tile_size);
-        let min_x = (visible.x / level.downsample).floor().max(0.0);
-        let min_y = (visible.y / level.downsample).floor().max(0.0);
-        let max_x = (visible.right() / level.downsample)
-            .ceil()
-            .min(f64::from(level.width));
-        let max_y = (visible.bottom() / level.downsample)
-            .ceil()
-            .min(f64::from(level.height));
-
-        if max_x <= min_x || max_y <= min_y {
-            return Vec::new();
-        }
-
-        let min_tile_x = (min_x / tile_size).floor() as u32;
-        let min_tile_y = (min_y / tile_size).floor() as u32;
-        let max_tile_x = ((max_x - 1.0) / tile_size).floor() as u32;
-        let max_tile_y = ((max_y - 1.0) / tile_size).floor() as u32;
-        let center = visible.center();
-        let mut tiles = Vec::new();
-
-        for y in min_tile_y..=max_tile_y.min(level.tile_rows.saturating_sub(1)) {
-            for x in min_tile_x..=max_tile_x.min(level.tile_cols.saturating_sub(1)) {
-                let id = TileId {
-                    level: level.index,
-                    x,
-                    y,
-                };
-                let Some(tile) = self.tiles.get(&id) else {
-                    continue;
-                };
-                let rect = self.tile_world_rect(level, tile);
-                let tile_center = rect.center();
-                let distance =
-                    (tile_center.0 - center.0).powi(2) + (tile_center.1 - center.1).powi(2);
-
-                tiles.push(VisibleTile { id, rect, distance });
-            }
-        }
-
-        tiles.sort_by(|left, right| {
-            left.distance
-                .partial_cmp(&right.distance)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        tiles
-    }
-
-    fn tile_world_rect(&self, level: &LevelManifest, tile: &HeatmapTileManifest) -> Rect {
-        let x = f64::from(tile.x * self.tile_size) * level.downsample;
-        let y = f64::from(tile.y * self.tile_size) * level.downsample;
-        let width = f64::from(tile.width) * level.downsample;
-        let height = f64::from(tile.height) * level.downsample;
-
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
-        .clamped(self.width, self.height)
-    }
 }
 
 impl CellOverlayManifest {
@@ -1014,8 +859,9 @@ struct VisibleOverlayChunk {
     distance: f64,
 }
 
+/// Tile pyramid shared by the slide (RGBA) and heatmap (R8) layers.
 #[derive(Clone)]
-struct SlideManifest {
+struct TilePyramid {
     tile_size: u32,
     width: f64,
     height: f64,
@@ -1023,36 +869,59 @@ struct SlideManifest {
     tiles: HashMap<TileId, TileManifest>,
 }
 
-impl SlideManifest {
-    fn from_json(manifest_json: &str) -> Result<Self, JsValue> {
+impl TilePyramid {
+    fn from_slide_json(manifest_json: &str) -> Result<Self, JsValue> {
         let raw: RawManifest = serde_json::from_str(manifest_json)
             .map_err(|err| js_error(format!("failed to parse manifest: {err}")))?;
-        let mut tiles = HashMap::new();
+        let tiles = raw
+            .tiles
+            .into_iter()
+            .filter(|tile| !tile.skipped)
+            .map(|tile| tile.tile);
 
-        for tile in raw.tiles {
-            if tile.skipped {
-                continue;
-            }
+        Self::new(raw.tile_size, raw.width, raw.height, raw.levels, tiles)
+            .ok_or_else(|| js_error("manifest has no pyramid levels"))
+    }
 
-            tiles.insert(
-                TileId {
+    fn from_heatmap_json(manifest_json: &str) -> Result<Self, JsValue> {
+        let raw: RawHeatmapManifest = serde_json::from_str(manifest_json)
+            .map_err(|err| js_error(format!("failed to parse heatmap manifest: {err}")))?;
+        let tiles = raw.tiles.into_iter().map(|tile| TileManifest {
+            byte_size: Some(tile.byte_size),
+            ..tile.tile
+        });
+
+        Self::new(raw.tile_size, raw.width, raw.height, raw.levels, tiles)
+            .ok_or_else(|| js_error("heatmap manifest has no pyramid levels"))
+    }
+
+    fn new(
+        tile_size: u32,
+        width: u32,
+        height: u32,
+        levels: Vec<LevelManifest>,
+        tiles: impl Iterator<Item = TileManifest>,
+    ) -> Option<Self> {
+        if levels.is_empty() {
+            return None;
+        }
+
+        let tiles = tiles
+            .map(|tile| {
+                let id = TileId {
                     level: tile.level,
                     x: tile.x,
                     y: tile.y,
-                },
-                tile,
-            );
-        }
+                };
+                (id, tile)
+            })
+            .collect();
 
-        if raw.levels.is_empty() {
-            return Err(js_error("manifest has no pyramid levels"));
-        }
-
-        Ok(Self {
-            tile_size: raw.tile_size,
-            width: raw.width as f64,
-            height: raw.height as f64,
-            levels: raw.levels,
+        Some(Self {
+            tile_size,
+            width: f64::from(width),
+            height: f64::from(height),
+            levels,
             tiles,
         })
     }
@@ -1143,6 +1012,142 @@ impl SlideManifest {
         }
         .clamped(self.width, self.height)
     }
+
+    fn tile_requests(
+        &self,
+        camera: &Camera,
+        cache: &TextureCache,
+        max_requests: usize,
+    ) -> Option<String> {
+        let best_level = self.best_level(camera);
+        let mut requests = Vec::new();
+        let mut seen = HashSet::new();
+
+        for level in self.levels.iter().rev() {
+            if level.index < best_level.index {
+                continue;
+            }
+
+            let level_bias = if level.index == best_level.index {
+                1_000_000_000.0
+            } else {
+                f64::from(best_level.index.abs_diff(level.index)) * 10_000.0
+            };
+
+            for visible in self.visible_tiles(camera, level) {
+                if cache.contains(visible.id) || !seen.insert(visible.id) {
+                    continue;
+                }
+
+                if let Some(tile) = self.tiles.get(&visible.id) {
+                    requests.push(TileRequest {
+                        level: visible.id.level,
+                        x: visible.id.x,
+                        y: visible.id.y,
+                        width: tile.width,
+                        height: tile.height,
+                        path: tile.path.clone(),
+                        byte_size: tile.byte_size,
+                        priority: level_bias + visible.distance,
+                    });
+                }
+            }
+        }
+
+        requests.sort_by(|left, right| {
+            left.priority
+                .partial_cmp(&right.priority)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        requests.truncate(max_requests);
+        serde_json::to_string(&requests).ok()
+    }
+
+    fn prepare_draw(
+        &self,
+        camera: &Camera,
+        cache: &mut TextureCache,
+        frame_index: u64,
+    ) -> SlideDraw {
+        let best_level = self.best_level(camera);
+        let visible_tiles = self.visible_tiles(camera, best_level);
+        let mut vertices = Vec::with_capacity(visible_tiles.len() * 6);
+        let mut commands = Vec::new();
+        let mut cache_visible_ids = HashSet::new();
+
+        for visible in &visible_tiles {
+            cache_visible_ids.insert(visible.id);
+
+            let Some(sample) = self.sample_for_visible_tile(cache, best_level, *visible) else {
+                continue;
+            };
+
+            cache_visible_ids.insert(sample.texture_id);
+            cache.touch(sample.texture_id, frame_index);
+
+            let vertex_start = vertices.len() as u32;
+            push_tile_vertices(&mut vertices, visible.rect, sample.uv);
+            commands.push(DrawCommand {
+                texture_id: sample.texture_id,
+                vertex_start,
+            });
+        }
+
+        SlideDraw {
+            vertices,
+            commands,
+            cache_visible_ids,
+            visible_tile_count: visible_tiles.len(),
+        }
+    }
+
+    fn sample_for_visible_tile(
+        &self,
+        cache: &TextureCache,
+        best_level: &LevelManifest,
+        visible: VisibleTile,
+    ) -> Option<TileSample> {
+        if cache.contains(visible.id) {
+            return Some(TileSample {
+                texture_id: visible.id,
+                uv: UvRect::full(),
+            });
+        }
+
+        for level in self
+            .levels
+            .iter()
+            .filter(|level| level.index > best_level.index)
+        {
+            let center = visible.rect.center();
+            let level_x = (center.0 / level.downsample).floor().max(0.0) as u32;
+            let level_y = (center.1 / level.downsample).floor().max(0.0) as u32;
+            let id = TileId {
+                level: level.index,
+                x: (level_x / self.tile_size).min(level.tile_cols.saturating_sub(1)),
+                y: (level_y / self.tile_size).min(level.tile_rows.saturating_sub(1)),
+            };
+
+            if !cache.contains(id) {
+                continue;
+            }
+
+            let tile = self.tiles.get(&id)?;
+            let parent_rect = self.tile_world_rect(level, tile);
+            let uv = UvRect {
+                u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
+                v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
+                u1: ((visible.rect.right() - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0)
+                    as f32,
+                v1: ((visible.rect.bottom() - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0)
+                    as f32,
+            };
+
+            return Some(TileSample { texture_id: id, uv });
+        }
+
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1171,9 +1176,9 @@ struct Renderer {
     cell_style_bind_group: wgpu::BindGroup,
     cell_style_uniform: CellStyleUniform,
     cell_class_visible: [bool; CELL_STYLE_CLASS_CAP],
-    slide_manifest: Option<SlideManifest>,
+    slide_manifest: Option<TilePyramid>,
     cell_overlay_manifest: Option<CellOverlayManifest>,
-    heatmap_manifest: Option<HeatmapManifest>,
+    heatmap_manifest: Option<TilePyramid>,
     texture_cache: TextureCache,
     heatmap_cache: TextureCache,
     overlay_cache: OverlayCache,
@@ -1453,7 +1458,7 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn set_slide_manifest(&mut self, manifest: SlideManifest) {
+    fn set_slide_manifest(&mut self, manifest: TilePyramid) {
         self.texture_cache.clear();
         self.slide_manifest = Some(manifest);
         self.last_upload_time_ms = 0.0;
@@ -1472,7 +1477,7 @@ impl Renderer {
             .unwrap_or_else(|| "[]".to_string())
     }
 
-    fn set_heatmap_manifest(&mut self, manifest: HeatmapManifest) {
+    fn set_heatmap_manifest(&mut self, manifest: TilePyramid) {
         self.heatmap_cache.clear();
         self.heatmap_manifest = Some(manifest);
         self.last_upload_time_ms = 0.0;
@@ -1495,48 +1500,9 @@ impl Renderer {
     }
 
     fn visible_tile_requests(&self, camera: &Camera, max_requests: usize) -> Option<String> {
-        let manifest = self.slide_manifest.as_ref()?;
-        let best_level = manifest.best_level(camera);
-        let mut requests = Vec::new();
-        let mut seen = HashSet::new();
-
-        for level in manifest.levels.iter().rev() {
-            if level.index < best_level.index {
-                continue;
-            }
-
-            let level_bias = if level.index == best_level.index {
-                1_000_000_000.0
-            } else {
-                f64::from(best_level.index.abs_diff(level.index)) * 10_000.0
-            };
-
-            for visible in manifest.visible_tiles(camera, level) {
-                if self.texture_cache.contains(visible.id) || !seen.insert(visible.id) {
-                    continue;
-                }
-
-                if let Some(tile) = manifest.tiles.get(&visible.id) {
-                    requests.push(TileRequest {
-                        level: visible.id.level,
-                        x: visible.id.x,
-                        y: visible.id.y,
-                        width: tile.width,
-                        height: tile.height,
-                        path: tile.path.clone(),
-                        priority: level_bias + visible.distance,
-                    });
-                }
-            }
-        }
-
-        requests.sort_by(|left, right| {
-            left.priority
-                .partial_cmp(&right.priority)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        requests.truncate(max_requests);
-        serde_json::to_string(&requests).ok()
+        self.slide_manifest
+            .as_ref()?
+            .tile_requests(camera, &self.texture_cache, max_requests)
     }
 
     fn upload_tile_rgba(
@@ -1563,7 +1529,7 @@ impl Renderer {
         }
 
         let start = Date::now();
-        self.texture_cache.insert_rgba(
+        self.texture_cache.insert(
             &self.device,
             &self.queue,
             &self.texture_bind_group_layout,
@@ -1571,6 +1537,7 @@ impl Renderer {
             id,
             width,
             height,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
             rgba,
             self.frame_index,
         );
@@ -1639,49 +1606,9 @@ impl Renderer {
             return Some("[]".to_string());
         }
 
-        let manifest = self.heatmap_manifest.as_ref()?;
-        let best_level = manifest.best_level(camera);
-        let mut requests = Vec::new();
-        let mut seen = HashSet::new();
-
-        for level in manifest.levels.iter().rev() {
-            if level.index < best_level.index {
-                continue;
-            }
-
-            let level_bias = if level.index == best_level.index {
-                1_000_000_000.0
-            } else {
-                f64::from(best_level.index.abs_diff(level.index)) * 10_000.0
-            };
-
-            for visible in manifest.visible_tiles(camera, level) {
-                if self.heatmap_cache.contains(visible.id) || !seen.insert(visible.id) {
-                    continue;
-                }
-
-                if let Some(tile) = manifest.tiles.get(&visible.id) {
-                    requests.push(HeatmapTileRequest {
-                        level: visible.id.level,
-                        x: visible.id.x,
-                        y: visible.id.y,
-                        width: tile.width,
-                        height: tile.height,
-                        path: tile.path.clone(),
-                        byte_size: tile.byte_size,
-                        priority: level_bias + visible.distance,
-                    });
-                }
-            }
-        }
-
-        requests.sort_by(|left, right| {
-            left.priority
-                .partial_cmp(&right.priority)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        requests.truncate(max_requests);
-        serde_json::to_string(&requests).ok()
+        self.heatmap_manifest
+            .as_ref()?
+            .tile_requests(camera, &self.heatmap_cache, max_requests)
     }
 
     fn upload_heatmap_tile_bytes(
@@ -1708,7 +1635,7 @@ impl Renderer {
         }
 
         let start = Date::now();
-        self.heatmap_cache.insert_r8(
+        self.heatmap_cache.insert(
             &self.device,
             &self.queue,
             &self.texture_bind_group_layout,
@@ -1716,6 +1643,7 @@ impl Renderer {
             id,
             width,
             height,
+            wgpu::TextureFormat::R8Unorm,
             bytes,
             self.frame_index,
         );
@@ -2071,37 +1999,7 @@ impl Renderer {
             return SlideDraw::default();
         };
 
-        let best_level = manifest.best_level(camera);
-        let visible_tiles = manifest.visible_tiles(camera, best_level);
-        let mut vertices = Vec::with_capacity(visible_tiles.len() * 6);
-        let mut commands = Vec::new();
-        let mut cache_visible_ids = HashSet::new();
-
-        for visible in &visible_tiles {
-            cache_visible_ids.insert(visible.id);
-
-            let Some(sample) = self.sample_for_visible_tile(manifest, best_level, *visible) else {
-                continue;
-            };
-
-            cache_visible_ids.insert(sample.texture_id);
-            self.texture_cache
-                .touch(sample.texture_id, self.frame_index);
-
-            let vertex_start = vertices.len() as u32;
-            push_tile_vertices(&mut vertices, visible.rect, sample.uv);
-            commands.push(DrawCommand {
-                texture_id: sample.texture_id,
-                vertex_start,
-            });
-        }
-
-        SlideDraw {
-            vertices,
-            commands,
-            cache_visible_ids,
-            visible_tile_count: visible_tiles.len(),
-        }
+        manifest.prepare_draw(camera, &mut self.texture_cache, self.frame_index)
     }
 
     fn prepare_heatmap_draw(&mut self, camera: &Camera) -> SlideDraw {
@@ -2113,38 +2011,7 @@ impl Renderer {
             return SlideDraw::default();
         };
 
-        let best_level = manifest.best_level(camera);
-        let visible_tiles = manifest.visible_tiles(camera, best_level);
-        let mut vertices = Vec::with_capacity(visible_tiles.len() * 6);
-        let mut commands = Vec::new();
-        let mut cache_visible_ids = HashSet::new();
-
-        for visible in &visible_tiles {
-            cache_visible_ids.insert(visible.id);
-
-            let Some(sample) = self.sample_for_visible_heatmap_tile(manifest, best_level, *visible)
-            else {
-                continue;
-            };
-
-            cache_visible_ids.insert(sample.texture_id);
-            self.heatmap_cache
-                .touch(sample.texture_id, self.frame_index);
-
-            let vertex_start = vertices.len() as u32;
-            push_tile_vertices(&mut vertices, visible.rect, sample.uv);
-            commands.push(DrawCommand {
-                texture_id: sample.texture_id,
-                vertex_start,
-            });
-        }
-
-        SlideDraw {
-            vertices,
-            commands,
-            cache_visible_ids,
-            visible_tile_count: visible_tiles.len(),
-        }
+        manifest.prepare_draw(camera, &mut self.heatmap_cache, self.frame_index)
     }
 
     fn prepare_overlay_draw(&mut self, camera: &Camera) -> OverlayDraw {
@@ -2206,102 +2073,6 @@ impl Renderer {
         }
 
         highlights
-    }
-
-    fn sample_for_visible_tile(
-        &self,
-        manifest: &SlideManifest,
-        best_level: &LevelManifest,
-        visible: VisibleTile,
-    ) -> Option<TileSample> {
-        if self.texture_cache.contains(visible.id) {
-            return Some(TileSample {
-                texture_id: visible.id,
-                uv: UvRect::full(),
-            });
-        }
-
-        for level in manifest
-            .levels
-            .iter()
-            .filter(|level| level.index > best_level.index)
-        {
-            let center = visible.rect.center();
-            let level_x = (center.0 / level.downsample).floor().max(0.0) as u32;
-            let level_y = (center.1 / level.downsample).floor().max(0.0) as u32;
-            let id = TileId {
-                level: level.index,
-                x: (level_x / manifest.tile_size).min(level.tile_cols.saturating_sub(1)),
-                y: (level_y / manifest.tile_size).min(level.tile_rows.saturating_sub(1)),
-            };
-
-            if !self.texture_cache.contains(id) {
-                continue;
-            }
-
-            let tile = manifest.tiles.get(&id)?;
-            let parent_rect = manifest.tile_world_rect(level, tile);
-            let uv = UvRect {
-                u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
-                v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
-                u1: ((visible.rect.right() - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0)
-                    as f32,
-                v1: ((visible.rect.bottom() - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0)
-                    as f32,
-            };
-
-            return Some(TileSample { texture_id: id, uv });
-        }
-
-        None
-    }
-
-    fn sample_for_visible_heatmap_tile(
-        &self,
-        manifest: &HeatmapManifest,
-        best_level: &LevelManifest,
-        visible: VisibleTile,
-    ) -> Option<TileSample> {
-        if self.heatmap_cache.contains(visible.id) {
-            return Some(TileSample {
-                texture_id: visible.id,
-                uv: UvRect::full(),
-            });
-        }
-
-        for level in manifest
-            .levels
-            .iter()
-            .filter(|level| level.index > best_level.index)
-        {
-            let center = visible.rect.center();
-            let level_x = (center.0 / level.downsample).floor().max(0.0) as u32;
-            let level_y = (center.1 / level.downsample).floor().max(0.0) as u32;
-            let id = TileId {
-                level: level.index,
-                x: (level_x / manifest.tile_size).min(level.tile_cols.saturating_sub(1)),
-                y: (level_y / manifest.tile_size).min(level.tile_rows.saturating_sub(1)),
-            };
-
-            if !self.heatmap_cache.contains(id) {
-                continue;
-            }
-
-            let tile = manifest.tiles.get(&id)?;
-            let parent_rect = manifest.tile_world_rect(level, tile);
-            let uv = UvRect {
-                u0: ((visible.rect.x - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0) as f32,
-                v0: ((visible.rect.y - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0) as f32,
-                u1: ((visible.rect.right() - parent_rect.x) / parent_rect.width).clamp(0.0, 1.0)
-                    as f32,
-                v1: ((visible.rect.bottom() - parent_rect.y) / parent_rect.height).clamp(0.0, 1.0)
-                    as f32,
-            };
-
-            return Some(TileSample { texture_id: id, uv });
-        }
-
-        None
     }
 
     fn update_memory_stats(&mut self, extra_cpu_bytes: usize) {
@@ -2803,8 +2574,10 @@ impl TextureCache {
         }
     }
 
+    /// Uploads a tile texture. `data` must already be validated to hold
+    /// `width * height` texels of `format`.
     #[allow(clippy::too_many_arguments)]
-    fn insert_rgba(
+    fn insert(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -2813,7 +2586,8 @@ impl TextureCache {
         id: TileId,
         width: u32,
         height: u32,
-        rgba: &[u8],
+        format: wgpu::TextureFormat,
+        data: &[u8],
         frame_index: u64,
     ) {
         if let Some(old) = self.entries.remove(&id) {
@@ -2826,12 +2600,12 @@ impl TextureCache {
             depth_or_array_layers: 1,
         };
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("fovea-slide-tile"),
+            label: Some("fovea-tile"),
             size: texture_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -2842,17 +2616,17 @@ impl TextureCache {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            rgba,
+            data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(width * 4),
+                bytes_per_row: format.block_copy_size(None).map(|size| width * size),
                 rows_per_image: Some(height),
             },
             texture_size,
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fovea-slide-tile-bind-group"),
+            label: Some("fovea-tile-bind-group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2865,82 +2639,7 @@ impl TextureCache {
                 },
             ],
         });
-        let bytes = width as usize * height as usize * 4;
-
-        self.entries.insert(
-            id,
-            TextureEntry {
-                bind_group,
-                bytes,
-                last_used_frame: frame_index,
-            },
-        );
-        self.bytes += bytes;
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn insert_r8(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        id: TileId,
-        width: u32,
-        height: u32,
-        values: &[u8],
-        frame_index: u64,
-    ) {
-        if let Some(old) = self.entries.remove(&id) {
-            self.bytes = self.bytes.saturating_sub(old.bytes);
-        }
-
-        let texture_size = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("fovea-heatmap-tile"),
-            size: texture_size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            values,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width),
-                rows_per_image: Some(height),
-            },
-            texture_size,
-        );
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("fovea-heatmap-tile-bind-group"),
-            layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(sampler),
-                },
-            ],
-        });
-        let bytes = width as usize * height as usize;
+        let bytes = data.len();
 
         self.entries.insert(
             id,
@@ -2957,7 +2656,7 @@ impl TextureCache {
         &mut self,
         visible_ids: &HashSet<TileId>,
         camera: &Camera,
-        manifest: Option<&SlideManifest>,
+        manifest: Option<&TilePyramid>,
     ) {
         if self.bytes <= self.limit_bytes {
             return;
@@ -2993,7 +2692,7 @@ impl TextureCache {
 fn eviction_score(
     id: TileId,
     camera: &Camera,
-    manifest: Option<&SlideManifest>,
+    manifest: Option<&TilePyramid>,
     entry: Option<&TextureEntry>,
 ) -> f64 {
     let high_resolution_bias = f64::from(u32::MAX - id.level) * 1_000_000_000.0;
@@ -3402,12 +3101,12 @@ mod tests {
             "tiles": []
         }"#;
 
-        assert!(SlideManifest::from_json(manifest).is_err());
+        assert!(TilePyramid::from_slide_json(manifest).is_err());
     }
 
     #[test]
     fn slide_tile_culling_returns_visible_edge_tiles() {
-        let manifest = SlideManifest::from_json(
+        let manifest = TilePyramid::from_slide_json(
             r#"{
                 "tile_size": 256,
                 "width": 512,
@@ -3450,11 +3149,67 @@ mod tests {
             x: 1,
             y: 1
         }));
+
+        let cache = TextureCache::new(TILE_CACHE_LIMIT_BYTES);
+        let requests: Vec<serde_json::Value> = serde_json::from_str(
+            &manifest
+                .tile_requests(&camera, &cache, 16)
+                .expect("requests serialize"),
+        )
+        .expect("requests parse");
+        assert_eq!(requests.len(), 4);
+        assert!(requests
+            .iter()
+            .all(|request| request.get("byteSize").is_none()));
+    }
+
+    #[test]
+    fn heatmap_tile_requests_include_coarser_levels_and_byte_size() {
+        let manifest = TilePyramid::from_heatmap_json(
+            r#"{
+                "id": "density",
+                "width": 1024,
+                "height": 1024,
+                "tileSize": 256,
+                "levels": [
+                    {"index": 0, "width": 512, "height": 512, "downsample": 2.0, "tileCols": 2, "tileRows": 2},
+                    {"index": 1, "width": 256, "height": 256, "downsample": 4.0, "tileCols": 1, "tileRows": 1}
+                ],
+                "tiles": [
+                    {"level":0,"x":0,"y":0,"width":256,"height":256,"path":"0/0_0.fovh","byteSize":65536},
+                    {"level":0,"x":1,"y":0,"width":256,"height":256,"path":"0/1_0.fovh","byteSize":65536},
+                    {"level":0,"x":0,"y":1,"width":256,"height":256,"path":"0/0_1.fovh","byteSize":65536},
+                    {"level":0,"x":1,"y":1,"width":256,"height":256,"path":"0/1_1.fovh","byteSize":65536},
+                    {"level":1,"x":0,"y":0,"width":256,"height":256,"path":"1/0_0.fovh","byteSize":65536}
+                ]
+            }"#,
+        )
+        .expect("heatmap manifest parses");
+        let mut camera = Camera::fit_dimensions(512, 512, 1024.0, 1024.0, 1.0);
+        camera.center_x = 512.0;
+        camera.center_y = 512.0;
+        camera.zoom = 0.5;
+
+        let cache = TextureCache::new(HEATMAP_CACHE_LIMIT_BYTES);
+        let requests: Vec<serde_json::Value> = serde_json::from_str(
+            &manifest
+                .tile_requests(&camera, &cache, 16)
+                .expect("requests serialize"),
+        )
+        .expect("requests parse");
+
+        // Level 0 is the best level at zoom 0.5; the coarser level-1 tile is requested first.
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0]["level"], 1);
+        assert!(requests[1..].iter().all(|request| request["level"] == 0));
+        assert!(requests
+            .iter()
+            .all(|request| request["byteSize"] == 65536 && request["path"].is_string()));
     }
 
     #[test]
     fn heatmap_manifest_accepts_camel_case_tiles() {
-        let manifest = HeatmapManifest::from_json(
+        let manifest = TilePyramid::from_heatmap_json(
             r#"{
                 "id": "density",
                 "width": 1024,
