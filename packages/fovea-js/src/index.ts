@@ -112,7 +112,7 @@ interface HeatmapTileRequest {
   priority: number;
 }
 
-export class FoveaViewer {
+export class FoveaViewer extends EventTarget {
   private animationFrame = 0;
   private destroyed = false;
   private slideVersion = 0;
@@ -132,7 +132,6 @@ export class FoveaViewer {
   private readonly inflightTiles = new Map<string, AbortController>();
   private readonly inflightCellChunks = new Map<string, AbortController>();
   private readonly inflightHeatmapTiles = new Map<string, AbortController>();
-  private readonly eventListeners = new Map<keyof FoveaViewerEvents, Set<EventCallback<any>>>();
   private readonly frameTimes: number[] = [];
   private readonly resizeObserver: ResizeObserver;
   private lastStats: FrameStats | null = null;
@@ -143,6 +142,7 @@ export class FoveaViewer {
     private readonly canvas: HTMLCanvasElement,
     options: FoveaViewerOptions
   ) {
+    super();
     this.tileRequestBatchSize = options.tileRequestBatchSize ?? 96;
     this.cellsRequestBatchSize = options.cellsRequestBatchSize ?? 64;
     this.heatmapRequestBatchSize = options.heatmapRequestBatchSize ?? 64;
@@ -355,15 +355,10 @@ export class FoveaViewer {
     eventName: K,
     callback: EventCallback<FoveaViewerEvents[K]>
   ): () => void {
-    let listeners = this.eventListeners.get(eventName);
-
-    if (!listeners) {
-      listeners = new Set();
-      this.eventListeners.set(eventName, listeners);
-    }
-
-    listeners.add(callback as EventCallback<any>);
-    return () => listeners?.delete(callback as EventCallback<any>);
+    const listener = (event: Event) =>
+      callback((event as CustomEvent<FoveaViewerEvents[K]>).detail);
+    this.addEventListener(eventName, listener);
+    return () => this.removeEventListener(eventName, listener);
   }
 
   resetCamera(): void {
@@ -849,30 +844,19 @@ export class FoveaViewer {
 
     for (const event of events) {
       if (event.type === "viewport-changed") {
-        this.dispatchEvent("viewport-change", {
-          centerX: event.centerX,
-          centerY: event.centerY,
-          zoom: event.zoom
-        });
+        this.dispatchEvent(
+          new CustomEvent("viewport-change", {
+            detail: {
+              centerX: event.centerX,
+              centerY: event.centerY,
+              zoom: event.zoom
+            }
+          })
+        );
         continue;
       }
 
-      this.dispatchEvent(event.type, event as FoveaViewerEvents[typeof event.type]);
-    }
-  }
-
-  private dispatchEvent<K extends keyof FoveaViewerEvents>(
-    eventName: K,
-    event: FoveaViewerEvents[K]
-  ): void {
-    const listeners = this.eventListeners.get(eventName);
-
-    if (!listeners) {
-      return;
-    }
-
-    for (const listener of listeners) {
-      listener(event);
+      this.dispatchEvent(new CustomEvent(event.type, { detail: event }));
     }
   }
 
